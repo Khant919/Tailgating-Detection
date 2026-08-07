@@ -108,10 +108,10 @@ class AccessController:
         """
         Launch Flask in a background daemon thread. Returns immediately.
         """
-        server_thread = threading.Thread(
+        self.server_thread = threading.Thread(
             target=self._app.run,
             kwargs={
-                "host":         "127.0.0.1",
+                "host":         "0.0.0.0",
                 "port":         self.port,
                 "debug":        False,
                 "use_reloader": False,
@@ -120,7 +120,7 @@ class AccessController:
             daemon=True,
             name="FlaskAccessServer",
         )
-        server_thread.start()
+        self.server_thread.start()
 
         print(
             f"[AccessController] 🚀 Flask server started on "
