@@ -12,6 +12,7 @@ class AccessControllerTests(unittest.TestCase):
         response = client.post(
             '/swipe',
             json={'employee_id': 'EMP1234', 'name': 'Alice Smith'},
+            headers={'x-api-key': 'dev-secret-api-key-12345'}
         )
 
         self.assertEqual(response.status_code, 200)
@@ -26,7 +27,11 @@ class AccessControllerTests(unittest.TestCase):
         controller = AccessController(port=5002, swipe_timeout=1)
         client = controller._app.test_client()
 
-        client.post('/swipe', json={'employee_id': 'EMP9999', 'name': 'Bob Jones'})
+        client.post(
+            '/swipe', 
+            json={'employee_id': 'EMP9999', 'name': 'Bob Jones'},
+            headers={'x-api-key': 'dev-secret-api-key-12345'}
+        )
         first_result = controller.check_for_tailgate()
         self.assertEqual(first_result['status'], 'authorized')
 

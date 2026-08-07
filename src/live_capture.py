@@ -183,13 +183,40 @@ class WebcamCapture:
                                         "No prior swipe on record"
                                     )
 
-                                # Module 6: Capture and log the tailgate event
+                                # Module 6+8: Capture, blur faces (privacy), and log the tailgate event
                                 os.makedirs(self.screenshot_dir, exist_ok=True)
                                 timestamp_filename = f"{int(time.time())}.jpg"
                                 saved_image_path = os.path.join(self.screenshot_dir, timestamp_filename)
 
-                                if cv2.imwrite(saved_image_path, frame):
-                                    print(f"[WebcamCapture] Saved evidence screenshot: {saved_image_path}")
+                                # Create a copy of the frame for logging to preserve unblurred live preview
+                                logged_frame = frame.copy()
+                                
+                                # Privacy protection: load built-in cascade frontal face model
+                                cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+                                face_cascade = cv2.CascadeClassifier(cascade_path)
+                                
+                                if not face_cascade.empty():
+                                    gray_frame = cv2.cvtColor(logged_frame, cv2.COLOR_BGR2GRAY)
+                                    faces = face_cascade.detectMultiScale(
+                                        gray_frame,
+                                        scaleFactor=1.1,
+                                        minNeighbors=5,
+                                        minSize=(30, 30)
+                                    )
+                                    
+                                    for (fx, fy, fw, fh) in faces:
+                                        face_roi = logged_frame[fy:fy+fh, fx:fx+fw]
+                                        # Apply Gaussian blur (using strong 51x51 kernel)
+                                        blurred_face = cv2.GaussianBlur(face_roi, (51, 51), 0)
+                                        logged_frame[fy:fy+fh, fx:fx+fw] = blurred_face
+                                        
+                                    if len(faces) > 0:
+                                        print(f"[WebcamCapture] 👥 Blurred {len(faces)} face(s) in evidence file for privacy compliance.")
+                                else:
+                                    print("[WebcamCapture] ⚠️ Warning: Failed to load face cascade. Saving raw screenshot.")
+
+                                if cv2.imwrite(saved_image_path, logged_frame):
+                                    print(f"[WebcamCapture] Saved privacy-hardened evidence screenshot: {saved_image_path}")
                                 else:
                                     print(f"[WebcamCapture] Error saving screenshot to: {saved_image_path}")
 
@@ -204,6 +231,8 @@ class WebcamCapture:
                                     f"{emp.get('name', 'Unknown')} "
                                     f"({emp.get('employee_id', 'N/A')})"
                                 )
+                                # Log authorized entry in SQLite database for reporting
+                                self.db.log_event(f"Authorized Entry: {emp.get('name', 'Unknown')}", "")
 
                     # Keep entry count in sync.
                     self._prev_entry_count = self.counter.entry_count

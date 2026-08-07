@@ -103,7 +103,9 @@ def run_qa_test(video_path: str):
                     # Send swipe POST request to local AccessController Flask port
                     url = f"http://127.0.0.1:{controller.port}/swipe"
                     payload = {"employee_id": "EMP-QA-999", "name": "QA Automated Tester"}
-                    response = requests.post(url, json=payload, timeout=3)
+                    api_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
+                    headers = {"x-api-key": api_key}
+                    response = requests.post(url, json=payload, headers=headers, timeout=3)
                     
                     if response.status_code == 200:
                         print(f"[QA Runner] Swipe registered: {response.json().get('message')}")

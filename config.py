@@ -132,3 +132,6 @@ HEADLESS_MODE = False
 
 # Process only every N-th frame to halve CPU load; reuse previous tracking data for skipped frames.
 PROCESS_EVERY_N_FRAMES = 2
+
+# Maximum expected bounding box area for a single person. Exceeding this flags potential occlusion (merged boxes).
+MAX_SINGLE_PERSON_AREA = 100000
