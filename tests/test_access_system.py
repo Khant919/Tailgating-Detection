@@ -7,7 +7,7 @@ from src.access_system import AccessController
 class AccessControllerTests(unittest.TestCase):
     def test_swipe_payload_is_stored_and_consumed(self):
         controller = AccessController(port=5001, swipe_timeout=5)
-        client = controller.app.test_client()
+        client = controller._app.test_client()
 
         response = client.post(
             '/swipe',
@@ -24,7 +24,7 @@ class AccessControllerTests(unittest.TestCase):
 
     def test_tailgate_returns_last_host_when_no_swipe_is_active(self):
         controller = AccessController(port=5002, swipe_timeout=1)
-        client = controller.app.test_client()
+        client = controller._app.test_client()
 
         client.post('/swipe', json={'employee_id': 'EMP9999', 'name': 'Bob Jones'})
         first_result = controller.check_for_tailgate()

@@ -122,3 +122,13 @@ FLASK_PORT = 5000
 
 # Webhook URL for external alert notifications (Slack / Teams / webhook.site)
 WEBHOOK_URL = "https://webhook.site/your-unique-id-here"
+
+# ---------------------------------------------------------------------------
+# Module 7: Optimization & QA Testing
+# ---------------------------------------------------------------------------
+
+# Disable all cv2.imshow and cv2.waitKey calls to save CPU.
+HEADLESS_MODE = False
+
+# Process only every N-th frame to halve CPU load; reuse previous tracking data for skipped frames.
+PROCESS_EVERY_N_FRAMES = 2
