@@ -17,9 +17,11 @@ Thread-safety:
   Thread C — Webhook thread     (reads immutable event_data dict — no lock needed)
 """
 
+import os
 import threading
 import time
 from collections import deque
+from functools import wraps
 from typing import Optional
 
 import requests
@@ -28,6 +30,27 @@ from flask import Flask, jsonify, request
 from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL
 
 SwipeRecord = dict   # type alias for readability
+
+
+def require_api_key(f):
+    """Decorator to verify that requests include a valid API key in the x-api-key header."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Fetch the system key from the environment, using a secure fallback for local dev
+        secret_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
+        
+        # Retrieve the key provided by the client
+        provided_key = request.headers.get("x-api-key")
+        
+        if not provided_key or provided_key != secret_key:
+            print(f"[AccessController] 🔐 Blocked Unauthorized Access: x-api-key='{provided_key}'")
+            return jsonify({
+                "status": "error",
+                "message": "Unauthorized. Missing or invalid x-api-key header."
+            }), 401
+            
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 class AccessController:
@@ -63,6 +86,7 @@ class AccessController:
         """Register Flask URL routes."""
 
         @self._app.route("/swipe", methods=["POST"])
+        @require_api_key
         def swipe():
             body: dict = {}
             if request.is_json:

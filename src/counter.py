@@ -32,6 +32,7 @@ from config import (
     TRIPWIRE_FLASH_FRAMES,
     TRIPWIRE_START,
     TRIPWIRE_THICKNESS,
+    MAX_SINGLE_PERSON_AREA,
 )
 
 
@@ -74,6 +75,14 @@ class TripwireCounter:
             x1, y1, x2, y2 = det.bbox
             curr_cx: int = (x1 + x2) // 2
             curr_cy: int = (y1 + y2) // 2   # True centre
+
+            # Occlusion Check: Flag if bounding box area suddenly exceeds a normal single-person area
+            box_area = (x2 - x1) * (y2 - y1)
+            if box_area > MAX_SINGLE_PERSON_AREA:
+                print(
+                    f"[TripwireCounter] ⚠️ WARNING: Potential Merged Box / Occlusion Detected! "
+                    f"ID: {track_id} | Area: {box_area} px (Threshold: {MAX_SINGLE_PERSON_AREA} px)"
+                )
 
             if track_id not in self.track_history:
                 self.track_history[track_id] = (curr_cx, curr_cy)
