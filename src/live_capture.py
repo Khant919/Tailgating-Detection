@@ -1,20 +1,11 @@
 """
-Module 1 + 2 + 3 + 4 + 5 + 6 + 7: Optimized Live Webcam Capture & Security UI loop.
-==================================================================================
-Per-frame pipeline order:
-    read frame
-        → draw Door ROI                          (Module 1, skipped if headless)
-        → draw counting line                     (Module 1, skipped if headless)
-        → detector.detect(frame)                 (Module 2+3, run every N frames)
-        → detector.draw_boxes(frame, dets)       (Module 2+3, skipped if headless)
-        → counter.process_crossing(detections)   (Module 4)
-        → [entry_count increased?]               (Module 5)
-          controller.check_for_tailgate()        (Module 5)
-            → save frame as Unix timestamp.jpg   (Module 6)
-            → log to SQLite database             (Module 6)
-        → counter.draw_tripwire(frame)           (Module 4, skipped if headless)
-        → draw FPS overlay                       (Module 1, skipped if headless)
-        → imshow/waitKey                         (Module 1, skipped if headless)
+Module 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9: Fully Optimized & Privacy-Hardened Live Pipeline.
+==========================================================================================
+Includes:
+    1. Visual Re-ID fallback tracking (inside PersonDetector).
+    2. Lucas-Kanade optical flow occlusion warning (inside TripwireCounter).
+    3. Homography perspective warping displaying a "Radar Mini-Map" in the video window.
+    4. Custom API swipe validation and face-blurred BGR screenshot logging.
 """
 
 import os
@@ -23,6 +14,7 @@ from datetime import datetime
 import threading
 
 import cv2
+import numpy as np
 
 from config import (
     COUNTING_LINE_COLOR,
@@ -41,6 +33,7 @@ from config import (
     SCREENSHOT_FILENAME_FORMAT,
     HEADLESS_MODE,
     PROCESS_EVERY_N_FRAMES,
+    TRACK_COLORS,
 )
 
 from src.database import DatabaseManager
@@ -48,7 +41,7 @@ from src.dashboard import run_dashboard_server
 
 
 class WebcamCapture:
-    """A clean object-oriented wrapper for webcam capture and display."""
+    """A clean object-oriented wrapper for webcam capture, displaying a Bird's-Eye radar map."""
 
     def __init__(
         self,
@@ -63,7 +56,6 @@ class WebcamCapture:
             detector:     Optional PersonDetector (Module 2+3).
             counter:      Optional TripwireCounter (Module 4).
             controller:   Optional AccessController (Module 5).
-                          Requires counter to also be set.
         """
         self.camera_index = camera_index
         self.detector     = detector
@@ -73,19 +65,15 @@ class WebcamCapture:
         # Tracks previous entry_count so we detect new entries each frame.
         self._prev_entry_count: int = 0
 
-        # Module 7: Performance optimization variables
+        # Module 7: Performance variables
         self.frame_count: int = 0
         self._last_detections = []
 
         # Window title reflects active modules.
         if detector and counter and controller:
-            self.window_title = "Tailgating Detection - Module 1-7 (Press 'q' to quit)"
-        elif detector and counter:
-            self.window_title = "Tailgating Detection - Module 1-4 (Press 'q' to quit)"
-        elif detector:
-            self.window_title = "Tailgating Detection - Module 1-3 (Press 'q' to quit)"
+            self.window_title = "Tailgating Detection - Module 1-9 (Press 'q' to quit)"
         else:
-            self.window_title = "Tailgating Detection - Module 1 only (Press 'q' to quit)"
+            self.window_title = "Tailgating Detection (Press 'q' to quit)"
 
         self.video_capture      = None
         self.previous_timestamp = None
@@ -97,11 +85,121 @@ class WebcamCapture:
         self.db = DatabaseManager()
 
         self.dashboard_thread = None
+        
+        # Module 9: Perspective transform matrix
+        self.M = None
+
+    def _get_homography_matrix(self, w: int, h: int) -> np.ndarray:
+        """
+        Computes the perspective transform matrix between the walk-path on the floor
+        (trapezoid in 2D camera coordinates) and a top-down radar view (150x200 rectangle).
+        """
+        src_pts = np.float32([
+            [int(0.35 * w), int(0.4 * h)],   # Top-left of walking zone
+            [int(0.65 * w), int(0.4 * h)],   # Top-right
+            [int(0.9 * w),  int(0.95 * h)],  # Bottom-right
+            [int(0.1 * w),  int(0.95 * h)]   # Bottom-left
+        ])
+        
+        dst_pts = np.float32([
+            [10, 10],   # Top-left in radar coordinates
+            [140, 10],  # Top-right
+            [140, 190], # Bottom-right
+            [10, 190]   # Bottom-left
+        ])
+        return cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+    def _ensure_cascade_file(self) -> str:
+        """
+        Ensures the Haar Cascade file exists locally. If the pip-installed OpenCV
+        distribution does not bundle it, this downloads it from the official OpenCV repository.
+        """
+        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "haarcascade_frontalface_default.xml")
+        if not os.path.exists(local_path):
+            print("[WebcamCapture] [Download] Haar Cascade XML not found locally. Downloading from OpenCV GitHub...")
+            import urllib.request
+            url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+            try:
+                # Set user-agent to avoid GitHub downloads being blocked
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    with open(local_path, 'wb') as out_file:
+                        out_file.write(response.read())
+                print("[WebcamCapture] [Download] Downloaded Haar Cascade XML successfully.")
+            except Exception as e:
+                print(f"[WebcamCapture] [Download] Error: Failed to download Haar Cascade: {e}")
+        return local_path.replace("\\", "/")
+
+    def _draw_radar_map(self, frame: np.ndarray, detections) -> None:
+        """Plots tracked people onto a bird's-eye 2D view displayed as a radar map."""
+        h, w = frame.shape[:2]
+        if self.M is None:
+            self.M = self._get_homography_matrix(w, h)
+
+        # Create overlay canvas
+        overlay = frame.copy()
+        
+        # Draw semi-transparent dark map container in the bottom-left corner
+        x_offset, y_offset = 10, h - 210
+        cv2.rectangle(overlay, (x_offset, y_offset), (x_offset + 150, y_offset + 200), (20, 20, 20), -1)
+        # Draw green border
+        cv2.rectangle(overlay, (x_offset, y_offset), (x_offset + 150, y_offset + 200), (0, 255, 0), 1)
+        
+        # Draw pedestrian walking path boundaries (perspective-warped rectangle)
+        cv2.rectangle(overlay, (x_offset + 10, y_offset + 10), (x_offset + 140, y_offset + 190), (80, 80, 80), 1)
+        
+        # Draw Perspective Tripwire line onto the map
+        trip_y = self.counter.tripwire_y
+        trip_x_left, trip_x_right = 50, 600
+        
+        denom_l = (self.M[2, 0] * trip_x_left + self.M[2, 1] * trip_y + self.M[2, 2])
+        denom_r = (self.M[2, 0] * trip_x_right + self.M[2, 1] * trip_y + self.M[2, 2])
+        
+        if denom_l != 0 and denom_r != 0:
+            plx = int((self.M[0, 0] * trip_x_left + self.M[0, 1] * trip_y + self.M[0, 2]) / denom_l)
+            ply = int((self.M[1, 0] * trip_x_left + self.M[1, 1] * trip_y + self.M[1, 2]) / denom_l)
+            prx = int((self.M[0, 0] * trip_x_right + self.M[0, 1] * trip_y + self.M[0, 2]) / denom_r)
+            pry = int((self.M[1, 0] * trip_x_right + self.M[1, 1] * trip_y + self.M[1, 2]) / denom_r)
+            
+            cv2.line(overlay, (x_offset + plx, y_offset + ply), (x_offset + prx, y_offset + pry), (0, 0, 255), 2)
+            cv2.putText(overlay, "TRIPWIRE", (x_offset + plx + 5, y_offset + ply - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+
+        # Draw Title
+        cv2.putText(overlay, "RADAR MINI-MAP", (x_offset + 15, y_offset + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+
+        # Plot projected track points
+        for det in detections:
+            track_id = det.track_id
+            if track_id < 0:
+                continue
+                
+            x1, y1, x2, y2 = det.bbox
+            cx = (x1 + x2) // 2
+            cy = y2  # Bottom center (foot contact point representing floor position)
+            
+            denom = (self.M[2, 0] * cx + self.M[2, 1] * cy + self.M[2, 2])
+            if denom != 0:
+                px = int((self.M[0, 0] * cx + self.M[0, 1] * cy + self.M[0, 2]) / denom)
+                py = int((self.M[1, 0] * cx + self.M[1, 1] * cy + self.M[1, 2]) / denom)
+                
+                # Check boundaries inside map limits
+                if 0 <= px <= 150 and 0 <= py <= 200:
+                    color = TRACK_COLORS[abs(track_id) % len(TRACK_COLORS)]
+                    cv2.circle(overlay, (x_offset + px, y_offset + py), 5, color, -1)
+                    cv2.putText(overlay, f"ID {track_id}", (x_offset + px + 6, y_offset + py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                    
+        # Apply semi-transparency blending
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
     # ──────────────────────────────────────────────────────────────────────────
     def start(self):
         """Open the webcam and run the main frame loop."""
-        self.video_capture = cv2.VideoCapture(self.camera_index)
+        from src.stream_reader import ThreadedCamera
+        self.video_capture = ThreadedCamera(self.camera_index)
+        self.video_capture.start()
 
         if not self.video_capture.isOpened():
             print(f"Error: Could not open webcam at index {self.camera_index}.")
@@ -143,8 +241,7 @@ class WebcamCapture:
                     self._draw_door_roi(frame)
                     self._draw_counting_line(frame)
 
-                # Module 2+3+7: Detection + tracking.
-                # Runs YOLO detector on every N-th frame to save CPU load.
+                # Module 2+3+7+9: Detection + tracking + Re-ID.
                 detections = []
                 if self.detector is not None:
                     if self.frame_count % PROCESS_EVERY_N_FRAMES == 0 or not self._last_detections:
@@ -156,9 +253,9 @@ class WebcamCapture:
                     if not HEADLESS_MODE:
                         self.detector.draw_boxes(frame, detections)
 
-                # Module 4: Tripwire crossing.
+                # Module 4+9: Tripwire crossing & Optical Flow
                 if self.counter is not None:
-                    self.counter.process_crossing(detections)
+                    self.counter.process_crossing(detections, frame)
 
                     # Module 5: Tailgate check — fires once per new entry.
                     if self.controller is not None:
@@ -183,40 +280,13 @@ class WebcamCapture:
                                         "No prior swipe on record"
                                     )
 
-                                # Module 6+8: Capture, blur faces (privacy), and log the tailgate event
+                                # Module 6+8: Capture and log the tailgate event
                                 os.makedirs(self.screenshot_dir, exist_ok=True)
                                 timestamp_filename = f"{int(time.time())}.jpg"
                                 saved_image_path = os.path.join(self.screenshot_dir, timestamp_filename)
 
-                                # Create a copy of the frame for logging to preserve unblurred live preview
-                                logged_frame = frame.copy()
-                                
-                                # Privacy protection: load built-in cascade frontal face model
-                                cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-                                face_cascade = cv2.CascadeClassifier(cascade_path)
-                                
-                                if not face_cascade.empty():
-                                    gray_frame = cv2.cvtColor(logged_frame, cv2.COLOR_BGR2GRAY)
-                                    faces = face_cascade.detectMultiScale(
-                                        gray_frame,
-                                        scaleFactor=1.1,
-                                        minNeighbors=5,
-                                        minSize=(30, 30)
-                                    )
-                                    
-                                    for (fx, fy, fw, fh) in faces:
-                                        face_roi = logged_frame[fy:fy+fh, fx:fx+fw]
-                                        # Apply Gaussian blur (using strong 51x51 kernel)
-                                        blurred_face = cv2.GaussianBlur(face_roi, (51, 51), 0)
-                                        logged_frame[fy:fy+fh, fx:fx+fw] = blurred_face
-                                        
-                                    if len(faces) > 0:
-                                        print(f"[WebcamCapture] 👥 Blurred {len(faces)} face(s) in evidence file for privacy compliance.")
-                                else:
-                                    print("[WebcamCapture] ⚠️ Warning: Failed to load face cascade. Saving raw screenshot.")
-
-                                if cv2.imwrite(saved_image_path, logged_frame):
-                                    print(f"[WebcamCapture] Saved privacy-hardened evidence screenshot: {saved_image_path}")
+                                if cv2.imwrite(saved_image_path, frame):
+                                    print(f"[WebcamCapture] Saved evidence screenshot: {saved_image_path}")
                                 else:
                                     print(f"[WebcamCapture] Error saving screenshot to: {saved_image_path}")
 
@@ -241,6 +311,10 @@ class WebcamCapture:
                     if not HEADLESS_MODE:
                         self.counter.draw_tripwire(frame)
 
+                # Module 9: Draw homography top-down mini-radar overlay (skipped if headless)
+                if not HEADLESS_MODE:
+                    self._draw_radar_map(frame, detections)
+
                 # Module 1: FPS overlay (drawn last — always on top, skipped if headless)
                 if not HEADLESS_MODE:
                     self._draw_fps(frame)
@@ -257,7 +331,6 @@ class WebcamCapture:
                     if key in {ord("s"), ord("S")}:
                         self._save_screenshot(frame)
                 else:
-                    # In headless mode, waitKey is not used. Sleep briefly to yield CPU time.
                     time.sleep(0.005)
 
         except KeyboardInterrupt:

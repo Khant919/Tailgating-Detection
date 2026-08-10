@@ -1,21 +1,14 @@
 """
-Module 4: Directional Counting — Virtual Tripwire
-===================================================
+Module 4 + 7 + 9: Directional Counting — Virtual Tripwire & Optical Flow Occlusion Recovery
+=============================================================================================
 Provides TripwireCounter which draws a horizontal virtual line across the
 frame and counts people as their box-centre crosses it in either direction.
-
-Crossing direction (image coordinates — y=0 is TOP):
-    centre_y goes from < tripwire_y  to >= tripwire_y  → ENTRY  (moved DOWN)
-    centre_y goes from > tripwire_y  to <= tripwire_y  → EXIT   (moved UP)
-
-Edge-case handling:
-    • IDs disappearing/reappearing: track_history is preserved between frames.
-    • Hovering on line: crossed_ids prevents double-counting same event.
-    • Unconfirmed tracks (track_id == -1): silently ignored.
-    • Using box CENTRE ((y1+y2)//2) so close-to-camera subjects work reliably.
+Includes Lucas-Kanade optical flow tracking to detect independent velocity vectors
+indicative of overlapping tailgaters (occlusion resolution).
 """
 
 import cv2
+import numpy as np
 
 from config import (
     COUNTER_ENTRY_COLOR,
@@ -33,12 +26,14 @@ from config import (
     TRIPWIRE_START,
     TRIPWIRE_THICKNESS,
     MAX_SINGLE_PERSON_AREA,
+    OPTICAL_FLOW_SPLIT_THRESHOLD,
 )
 
 
 class TripwireCounter:
     """
-    Counts people crossing a horizontal virtual tripwire in a video frame.
+    Counts people crossing a horizontal virtual tripwire and uses
+    optical flow to detect hidden tailgating occlusions inside overlapping boxes.
     """
 
     def __init__(
@@ -62,10 +57,39 @@ class TripwireCounter:
         self._flash_event:       str | None = None
         self._flash_frames_left: int        = 0
 
-    def process_crossing(self, detections) -> None:
+        # Module 9: Optical Flow tracking state
+        self._prev_gray = None
+        self._flow_pts = None
+
+    def _calculate_iou(self, box1: tuple[int, int, int, int], box2: tuple[int, int, int, int]) -> float:
+        """Helper to calculate the Intersection over Union (IoU) of two boxes."""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+        
+        x_left = max(x1_1, x1_2)
+        y_top = max(y1_1, y1_2)
+        x_right = min(x2_1, x2_2)
+        y_bottom = min(y2_1, y2_2)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+            
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = float(area1 + area2 - intersection_area)
+        
+        if union_area == 0:
+            return 0.0
+            
+        return intersection_area / union_area
+
+    def process_crossing(self, detections, frame=None) -> None:
         """
-        Analyse tracked detections and update entry/exit counts using bbox CENTRE.
+        Analyse tracked detections, check for crossings, and run optical flow
+        occlusion recovery if overlaps are detected.
         """
+        # Run crossing updates
         for det in detections:
             track_id = det.track_id
 
@@ -128,10 +152,97 @@ class TripwireCounter:
 
             self.track_history[track_id] = (curr_cx, curr_cy)
 
+        # Module 9: Optical Flow Occlusion Recovery
+        if frame is not None:
+            self._process_optical_flow(frame, detections)
+
+    def _process_optical_flow(self, frame: np.ndarray, detections) -> None:
+        """Runs Lucas-Kanade optical flow inside highly overlapping bounding boxes."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # 1. Identify overlapping box regions (IoU > 0.5)
+        overlap_regions = []
+        for i in range(len(detections)):
+            for j in range(i + 1, len(detections)):
+                box1 = detections[i].bbox
+                box2 = detections[j].bbox
+                if self._calculate_iou(box1, box2) > 0.5:
+                    # Capture overlap box dimensions
+                    ox1 = max(box1[0], box2[0])
+                    oy1 = max(box1[1], box2[1])
+                    ox2 = min(box1[2], box2[2])
+                    oy2 = min(box1[3], box2[3])
+                    if ox2 > ox1 and oy2 > oy1:
+                        overlap_regions.append((ox1, oy1, ox2, oy2))
+
+        # Check for large single boxes as backup
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            if (x2 - x1) * (y2 - y1) > MAX_SINGLE_PERSON_AREA:
+                overlap_regions.append((x1, y1, x2, y2))
+
+        # If no overlapping/occluded zones, clear points and update frame state
+        if not overlap_regions:
+            self._flow_pts = None
+            self._prev_gray = gray.copy()
+            return
+
+        # 2. Track points if we have active points from previous frame
+        if self._flow_pts is not None and self._prev_gray is not None:
+            p1, st, err = cv2.calcOpticalFlowPyrLK(
+                self._prev_gray, gray, self._flow_pts, None,
+                winSize=(15, 15), maxLevel=2,
+                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+            )
+            
+            # Filter successfully tracked points
+            if p1 is not None:
+                good_new = p1[st == 1]
+                good_old = self._flow_pts[st == 1]
+                
+                if len(good_new) >= 6:
+                    # Calculate vector displacements
+                    dx = good_new[:, 0] - good_old[:, 0]
+                    
+                    # Split points into two groups based on direction of movement (dx)
+                    group1_dx = dx[dx > 0]
+                    group2_dx = dx[dx <= 0]
+                    
+                    if len(group1_dx) >= 3 and len(group2_dx) >= 3:
+                        mean_g1 = np.mean(group1_dx)
+                        mean_g2 = np.mean(group2_dx)
+                        # If velocities diverge by more than the threshold, it indicates multiple people moving independently
+                        if abs(mean_g1 - mean_g2) > OPTICAL_FLOW_SPLIT_THRESHOLD:
+                            print(
+                                f"[TripwireCounter] ⚠️ WARNING: Optical Flow indicates active tailgating "
+                                f"occlusion inside bounding box! (Velocity Split: {abs(mean_g1 - mean_g2):.2f} px/f)"
+                            )
+                
+                self._flow_pts = good_new.reshape(-1, 1, 2)
+            else:
+                self._flow_pts = None
+        else:
+            # 3. Initialize points inside the occluded region (Shi-Tomasi corner detection)
+            mask = np.zeros_like(gray)
+            for (ox1, oy1, ox2, oy2) in overlap_regions:
+                # Add margin inside
+                margin_x = int((ox2 - ox1) * 0.1)
+                margin_y = int((oy2 - oy1) * 0.1)
+                cv2.rectangle(
+                    mask, 
+                    (ox1 + margin_x, oy1 + margin_y), 
+                    (ox2 - margin_x, oy2 - margin_y), 
+                    255, -1
+                )
+                
+            p0 = cv2.goodFeaturesToTrack(gray, maxCorners=30, qualityLevel=0.01, minDistance=5, mask=mask)
+            if p0 is not None:
+                self._flow_pts = p0
+                
+        self._prev_gray = gray.copy()
+
     def draw_tripwire(self, frame) -> None:
-        """
-        Draw the tripwire line and IN/OUT counter overlay onto frame in-place.
-        """
+        """Draw the tripwire line and IN/OUT counter overlay onto frame in-place."""
         if self._flash_frames_left > 0:
             line_color = (
                 TRIPWIRE_COLOR_ENTRY if self._flash_event == "entry"
@@ -198,3 +309,5 @@ class TripwireCounter:
         self.crossed_ids.clear()
         self._flash_event       = None
         self._flash_frames_left = 0
+        self._flow_pts          = None
+        self._prev_gray         = None

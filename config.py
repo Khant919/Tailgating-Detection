@@ -118,7 +118,7 @@ COUNTER_EXIT_COLOR     = (0, 0, 220)    # Red
 SWIPE_TIMEOUT_SECONDS = 5
 
 # Port for local Flask HTTP API
-FLASK_PORT = 5000
+FLASK_PORT = 5005
 
 # Webhook URL for external alert notifications (Slack / Teams / webhook.site)
 WEBHOOK_URL = "https://webhook.site/your-unique-id-here"
@@ -134,4 +134,7 @@ HEADLESS_MODE = False
 PROCESS_EVERY_N_FRAMES = 2
 
 # Maximum expected bounding box area for a single person. Exceeding this flags potential occlusion (merged boxes).
-MAX_SINGLE_PERSON_AREA = 100000
+MAX_SINGLE_PERSON_AREA = 350000
+
+# Minimum optical flow velocity split divergence threshold (pixels/frame) to flag tailgating occlusion.
+OPTICAL_FLOW_SPLIT_THRESHOLD = 12.0
