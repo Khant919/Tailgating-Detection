@@ -20,6 +20,7 @@ Thread-safety:
 import os
 import threading
 import time
+import datetime
 from collections import deque
 from functools import wraps
 from typing import Optional
@@ -31,6 +32,8 @@ import base64
 
 import requests
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL, JWT_SECRET
 
@@ -121,6 +124,14 @@ class AccessController:
 
         self._app: Flask = Flask(__name__)
         self._app.logger.disabled = True
+
+        # Initialize API rate limiter for DDoS and brute-force protection
+        self.limiter = Limiter(
+            get_remote_address,
+            app=self._app,
+            default_limits=["200 per day", "50 per hour"]
+        )
+
         self._register_routes()
 
         print(
@@ -141,6 +152,7 @@ class AccessController:
         """Register Flask URL routes."""
 
         @self._app.route("/swipe", methods=["POST"])
+        @self.limiter.limit("5 per second")
         def swipe():
             auth_header = request.headers.get("Authorization")
             provided_api_key = request.headers.get("x-api-key")
@@ -157,7 +169,7 @@ class AccessController:
                         "timestamp":   time.time(),
                     }
                 except jwt.ExpiredSignatureError:
-                    return jsonify({"status": "error", "message": "Badge registration has expired."}), 401
+                    return jsonify({"status": "denied", "reason": "QR Code Expired"}), 401
                 except jwt.InvalidTokenError:
                     return jsonify({"status": "error", "message": "Invalid security badge credentials."}), 401
             elif provided_api_key:
@@ -209,6 +221,7 @@ class AccessController:
 
         @self._app.route("/admin", methods=["GET"])
         @self._app.route("/admin/<employee_name>", methods=["GET"])
+        @self.limiter.limit("10 per minute")
         def admin(employee_name=None):
             from flask import render_template_string
             
@@ -222,6 +235,7 @@ class AccessController:
                 "employee_id": target_id,
                 "name":        target_name,
                 "iat":         int(time.time()),
+                "exp":         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60),
             }
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
             
@@ -331,6 +345,32 @@ class AccessController:
             <a href="{{ onboarding_url }}" style="color: #00ff66; text-decoration: none;">{{ onboarding_url }}</a>
         </div>
     </div>
+
+    <script>
+        // Auto-close Admin Portal when employee entry is verified
+        let closed = false;
+        setInterval(async () => {
+            if (closed) return;
+            try {
+                const res = await fetch('/status');
+                const data = await res.json();
+                if (data.last_valid_swipe) {
+                    const elapsed = (Date.now() / 1000) - data.last_valid_swipe.timestamp;
+                    if (elapsed <= 6.0) {
+                        closed = true;
+                        document.querySelector('.card').innerHTML = `
+                            <h1 style="color: #00ff66; margin-top: 10px;">✅ ACCESS GRANTED</h1>
+                            <p style="color: #ffffff; font-size: 16px; margin: 15px 0;">Entry Verified for <strong>${data.last_valid_swipe.name}</strong>!</p>
+                            <p style="font-size: 12px; color: #888888;">Closing window...</p>
+                        `;
+                        setTimeout(() => {
+                            window.close();
+                        }, 1200);
+                    }
+                }
+            } catch (e) {}
+        }, 1000);
+    </script>
 </body>
 </html>
             """

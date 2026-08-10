@@ -67,8 +67,51 @@ class TwoFactorAuthenticator:
         # Active session state management: {"employee_name": timestamp_matched}
         self.active_sessions: Dict[str, float] = {}
 
+        # Sliding window history of Eye Aspect Ratios (EAR) for anti-spoofing liveness check: {"employee_name": [ear1, ear2, ...]}
+        self.ear_history: Dict[str, List[float]] = {}
+
         # Perform enrollment scanning on startup
         self._enroll_known_faces()
+
+    def _calculate_ear(self, eye_points: List[Tuple[int, int]]) -> float:
+        """
+        Calculates Eye Aspect Ratio (EAR) for a single eye using 6 2D facial landmark points.
+        Formula: EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+        """
+        if len(eye_points) < 6:
+            return 0.0
+        
+        pts = np.array(eye_points, dtype=np.float32)
+        # Vertical landmark distances
+        v1 = np.linalg.norm(pts[1] - pts[5])
+        v2 = np.linalg.norm(pts[2] - pts[4])
+        # Horizontal landmark distance
+        h = np.linalg.norm(pts[0] - pts[3])
+
+        if h == 0:
+            return 0.0
+
+        return float((v1 + v2) / (2.0 * h))
+
+    def check_liveness(self, face_landmarks: dict) -> Tuple[bool, float]:
+        """
+        Calculates average Eye Aspect Ratio (EAR) for left and right eyes.
+
+        Args:
+            face_landmarks: Dictionary containing 'left_eye' and 'right_eye' 2D point lists.
+
+        Returns:
+            Tuple (is_eyes_open: bool, average_ear: float)
+        """
+        left_eye = face_landmarks.get("left_eye", [])
+        right_eye = face_landmarks.get("right_eye", [])
+
+        left_ear = self._calculate_ear(left_eye)
+        right_ear = self._calculate_ear(right_eye)
+
+        avg_ear = (left_ear + right_ear) / 2.0
+        # EAR threshold > 0.12 indicates open/naturally functioning eyes
+        return (avg_ear > 0.12), avg_ear
 
     def _enroll_known_faces(self) -> None:
         """
@@ -159,6 +202,12 @@ class TwoFactorAuthenticator:
         if crop.size == 0:
             return False, None
 
+        # Resolution Guard: Prevent processing small crops when subject is too far from camera
+        crop_h, crop_w = crop.shape[:2]
+        if crop_h < 60 or crop_w < 60:
+            print(f"[Auth] Face crop too small ({crop_w}x{crop_h} px). Waiting for subject to move closer.")
+            return False, None
+
         # Convert BGR crop to RGB for dlib / face_recognition
         rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
 
@@ -186,6 +235,31 @@ class TwoFactorAuthenticator:
 
         if best_distance <= self.tolerance:
             matched_name = known_names[best_match_index]
+
+            # ------------------------------------------------------------------
+            # PASSIVE LIVENESS CHECK: EAR & Static Photo Variance Detection
+            # ------------------------------------------------------------------
+            landmarks_list = face_recognition.face_landmarks(rgb_crop)
+            if landmarks_list:
+                landmarks = landmarks_list[0]
+                has_valid_eyes, current_ear = self.check_liveness(landmarks)
+
+                if matched_name not in self.ear_history:
+                    self.ear_history[matched_name] = []
+                self.ear_history[matched_name].append(current_ear)
+
+                # Maintain 5-frame sliding window
+                if len(self.ear_history[matched_name]) > 5:
+                    self.ear_history[matched_name].pop(0)
+
+                # Detect static photo spoof attempt across 5 consecutive frames
+                if len(self.ear_history[matched_name]) >= 5:
+                    ear_variance = float(np.var(self.ear_history[matched_name]))
+                    # Near-zero EAR variance (< 0.00002) indicates a static photo held in front of camera
+                    if ear_variance < 0.00002:
+                        print(f"[Auth] ⚠️ SPOOF ATTEMPT DETECTED: Static photo detected for '{matched_name}'!")
+                        return False, None
+
             # State Management: Add/Update user in active sessions with current timestamp
             self.active_sessions[matched_name] = time.time()
             print(f"[2FA Engine] [MATCH] FACE MATCHED: '{matched_name}' (Distance: {best_distance:.3f})")

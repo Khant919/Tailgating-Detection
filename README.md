@@ -1,125 +1,142 @@
-# Edge AI Tailgating Detection & Auditing System
+# 🛡️ Edge AI Tailgating Detection & 2FA Access System
 
-An edge-computed computer vision system designed to detect and log physical tailgating infractions (unauthorized entry events) in real-time. By integrating object detection (YOLOv8), multi-object tracking (ByteTrack), a directional tripwire counter, a secured card-swipe simulation API, a GDPR-compliant face-blurring engine, and an interactive dark-mode evidence dashboard console, this system provides a complete software-defined alternative to physical access control turnstiles.
+An enterprise-grade, edge-computed Computer Vision system designed to detect and log physical tailgating infractions (unauthorized entry events) in real-time. 
+
+By combining **YOLOv8 Object Detection**, **ByteTrack Multi-Object Tracking**, a **Directional Virtual Tripwire**, a **2FA Biometric & QR Verification Engine**, **Passive Liveness Detection (EAR)**, and an **Interactive Evidence Dashboard**, this system provides a complete software-defined alternative to expensive physical security turnstiles.
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️ System Architecture & Workflow
 
 ```mermaid
 flowchart TD
-    A[Webcam / IP Camera Feed] --> B[Frame Capture & Scaling]
-    B --> C{Frame Skip?}
-    C -- Yes (Skip Detection) --> D[Reuse Previous Tracking State]
-    C -- No (Process Frame) --> E[YOLOv8 Person Detector]
-    E --> F[ByteTrack Multi-Object Tracker]
-    D & F --> G[Directional Tripwire Crossing Logic]
-    G --> H{Crossing Detected?}
-    H -- No --> I[Render Display Loop]
-    H -- Yes --> J{Access API Swipe Recorded?}
-    J -- Yes --> K[Log 'Authorized Entry' to SQLite]
-    J -- No --> L[🚨 TAILGATE EVENT RAISED]
-    L --> M[Haar Cascade Face Classifier]
-    M --> N[Extract Face ROI & Apply Gaussian Blur]
-    N --> O[Save Privacy-Hardened BGR Screenshot]
-    O --> P[Log 'Tailgate Detected' to SQLite]
-    P & K --> Q[Interactive Flask Guard Dashboard - Port 5001]
+    A[Webcam / IP Camera Feed] --> B[YOLOv8 Person Detection]
+    B --> C[ByteTrack Multi-Object Tracking]
+    C --> D[Face Recognition & 128D Embedding Lookup]
+    D --> E{Resolution & Liveness Check}
+    E -- Failed / Photo Spoof --> F[Reject Verification / Log Warning]
+    E -- Passed (Face Matched) --> G[Auto-Open Admin Portal & Dynamic QR Code]
+    G --> H[Employee Scans QR / Mobile Keycard Swipe]
+    H --> I[2FA Access Granted & Auto-Close Portal]
+    C --> J[Directional Virtual Tripwire Crossing]
+    J --> K{Authorized Access Recorded?}
+    K -- Yes --> L[Log 'Authorized Entry' to SQLite]
+    K -- No (Tailgate) --> M[🚨 TAILGATE BREACH ALERT]
+    M --> N[Trigger Non-Blocking Audio Alarm Chime]
+    M --> O[Haar Cascade Face Blur & Screenshot Logging]
+    O --> P[Interactive Guard Dashboard - Port 5001]
 ```
 
 ---
 
 ## 🌟 Key Features
 
-### 1. 🛡️ System Security & API Hardening
-- The card-swipe simulator API endpoint `/swipe` (running on Flask port `5000`) is secured using a custom authentication decorator.
-- Enforces access control by checking request headers for an `x-api-key`. 
-- Compares it to a secure key stored in the `TAILGATE_API_KEY` system environment variable, blocking unauthorized requests with a `401 Unauthorized` response.
+### 1. 🔑 2-Factor Authentication (2FA) Pipeline (`src/auth_pipeline.py`)
+- **Biometric Face Enrollment**: Pre-computes 128D face encodings from images in `known_faces/` (supports `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`, `.tiff`).
+- **Resolution Guard**: Enforces a minimum `60x60` px face crop dimension before encoding to eliminate false positives when subjects are too far away.
+- **Passive Liveness Detection (EAR)**: Computes Eye Aspect Ratio (EAR) and monitors EAR variance across 5 consecutive frames. Rejects static photos or phone screen spoofing attempts with a `⚠️ SPOOF ATTEMPT DETECTED` alert.
+- **5-Second Session Expiration**: Active face matches automatically time out after 5 seconds if no QR code scan or mobile keycard swipe occurs.
 
-### 2. 👥 Privacy Compliance (Ethical AI)
-- **Biometric Face Blurring**: On tailgate detection, a **Haar Cascade classifier** (`haarcascade_frontalface_default.xml`) automatically detects faces in the screenshot frame. The detected Regions of Interest (ROIs) are obscured using a high-density **Gaussian Blur** (`51x51` kernel) before saving to disk. This complies with GDPR/privacy standards while maintaining a clear view of the surrounding evidence.
-- **Data Retention Manager**: Includes `src/data_retention.py`, which implements a data scrubbing policy. Running this script deletes database entries and deletes screenshots older than **30 days**, vacuuming the SQLite file to reclaim disk space.
+### 2. 📱 Admin Portal & Dynamic QR Badge Generator (`src/access_system.py`)
+- **Auto-Browser Launch**: When a face match occurs, the system automatically launches the Admin Portal (`http://localhost:5005/admin`) in a single browser window.
+- **Expiring JWT Tokens**: Dynamic QR codes embed 60-second expiring JWT badge tokens (`exp` claim) to prevent replay attacks.
+- **Mobile Keycard Swipe**: Employees can scan the QR code using any smartphone on local Wi-Fi to load `/keycard` and authorize their entry.
+- **Auto-Disappearing Page**: Upon entry verification, the Admin Portal displays `✅ ACCESS GRANTED` and automatically closes the browser tab.
 
-### 3. 🎯 Occlusion & Merged Box Handling
-- Overlapping and occluded subjects can merge bounding boxes temporarily. The counter checks the bounding box area against `MAX_SINGLE_PERSON_AREA` (default `100,000` pixels).
-- If the area exceeds this threshold, the console flags it with a `⚠️ WARNING: Potential Merged Box / Occlusion Detected!` log, alerting security of complex tracking conditions.
+### 3. 🔒 Cyber Security & Rate Limiting (`Flask-Limiter`)
+- **DDoS & Brute-Force Shield**: Enforces rate limiting on Flask routes:
+  - `POST /swipe`: Restricted to **5 requests per second** per IP.
+  - `GET /admin`: Restricted to **10 requests per minute** per IP.
+- **API Key Security**: Validates requests via `x-api-key` headers or JWT bearer tokens.
 
-### 4. ⚡ CPU Performance Optimizations
-- **Frame Skipping**: Features `PROCESS_EVERY_N_FRAMES = 2` which limits full YOLOv8 inference to every 2nd frame, while skipped frames reuse the previous frame's tracking data, reducing CPU load by approximately 45%.
-- **Headless Mode**: Activating `HEADLESS_MODE = True` bypasses all drawing operations, visual GUI frame outputs (`cv2.imshow`), and key polling (`cv2.waitKey`), allowing the system to run on low-power edge gateways and headless servers.
+### 4. 🔊 Non-Blocking Audio Breach Alarm (`src/live_capture.py`)
+- Spawns a dedicated background daemon thread (`BreachAlarmThread`) running `winsound.Beep(2000, 500)` (Windows) or `\a` terminal bell (Linux/macOS) whenever a tailgate breach occurs, ensuring zero OpenCV video frame stuttering.
+
+### 5. 👥 Privacy Compliance (GDPR Face Blurring & Data Retention)
+- **Biometric Face Blurring**: Automatically applies a `51x51` Gaussian blur ROI over faces in breach screenshots.
+- **Data Retention Purge**: Includes `src/data_retention.py` to scrub database records and screenshot evidence older than 30 days.
 
 ---
 
-## 💼 Business Case & Return on Investment (ROI)
+## 💼 Business ROI vs. Physical Turnstiles
 
-Traditional security installations enforce entry security rules using physical turnstiles, speed gates, or mantraps. These solutions carry significant capital and operational costs:
-
-| Expense Category | Physical Hardware Turnstile | Edge AI SecureAccess Software |
+| Expense Category | Physical Hardware Turnstile | SecureAccess Software System |
 | :--- | :--- | :--- |
-| **Capital Expenditure (CapEx)** | **$15,000 – $25,000** per lane (Unit purchase + shipping) | **$0** (Runs on existing standard workstations/edge units) |
-| **Installation & Masonry** | **$5,000 – $10,000** (Floor bolting, concrete coring, power line runs) | **$100** (Mounting a standard 1080p webcam/IP camera) |
-| **Spatial Footprint** | Requires significant floor space (obstructs fire exit pathways) | **Zero footprint** (Mounted overhead or on door frames) |
-| **Annual Maintenance** | **$1,500 – $3,000** (Mechanical wear, motor repairs, calibration) | **$0** (No moving parts, standard software upgrades) |
-| **Biometric Auditing** | None (Requires additional camera configurations) | **Built-in** (Automated face-blurred evidence screenshots + SQLite logs) |
-| **TOTAL INITIAL COST** | **$20,000 – $35,000** per lane | **~$100 – $300** (Standard webcam + bracket) |
-
-**SecureAccess** replaces cost-heavy mechanical turnstiles by using computer vision on standard CCTV feeds. It turns existing security cameras into smart compliance checkpoints, alerting guards of tailgaters instantly at **99% lower cost**.
+| **Capital Expenditure (CapEx)** | **$15,000 – $25,000** per lane | **$0** (Runs on existing workstations) |
+| **Installation & Masonry** | **$5,000 – $10,000** (Floor bolting, power lines) | **$100** (Mounting standard 1080p webcam) |
+| **Spatial Footprint** | Obstructs floor space / fire exits | **Zero footprint** (Mounted overhead) |
+| **Maintenance** | **$1,500 – $3,000** annual mechanical upkeep | **$0** (No moving parts) |
+| **Biometric Auditing** | Requires extra hardware | **Built-in** (2FA + Face Blur Evidence Logs) |
+| **TOTAL INITIAL COST** | **$20,000 – $35,000** per lane | **~$100 – $300** (Standard webcam) |
 
 ---
 
-## 🚀 Setup & Installation
+## 🛠️ Installation & Setup
 
-### 1. Requirements & Dependencies
-Ensure you have **Python 3.10+** installed. Clone the repository, activate your virtual environment, and install dependencies:
-```powershell
-# Create and activate virtual environment
+### 1. Clone Repository & Create Virtual Environment
+```bash
+git clone https://github.com/Khant919/Tailgating-Detection.git
+cd Tailgating-Detection
+
+# Create virtual environment
 python -m venv venv
+
+# Activate on Windows (PowerShell):
 .\venv\Scripts\Activate.ps1
 
-# Install required packages
-pip install -r requirements.txt
+# Activate on Linux/macOS:
+source venv/bin/activate
 ```
 
-### 2. Set Up the Security API Key
-Configure the secret key environment variable:
-```powershell
-# PowerShell:
-$env:TAILGATE_API_KEY="dev-secret-api-key-12345"
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+*(Note: Windows Python 3.13 users can use `pip install dlib-bin` for precompiled binaries).*
 
-# Command Prompt (CMD):
-set TAILGATE_API_KEY=dev-secret-api-key-12345
+### 3. Add Employee Photos for Face Enrollment
+Place employee reference photos inside the `known_faces/` folder:
+```
+known_faces/
+├── Alice.png
+├── Khant.png
+└── Bob.webp
 ```
 
 ---
 
-## ⚙️ Running the System
+## 🚀 Running the Project
 
-### 1. Run the Live Capture Loop
-Run the main system script to activate the camera pipeline, start the card-swipe server (port 5000), and boot the guard dashboard console (port 5001):
-```powershell
+### 1. Launch the Main Application
+```bash
 python main.py
 ```
+This initializes YOLOv8 detection, enrolls employee faces from `known_faces/`, starts the Flask Access Server on `http://127.0.0.1:5005`, and opens the OpenCV live webcam stream.
 
-### 2. Simulate Card Swipes
-To register a swipe for an employee (making a request that bypasses the tailgating alarm for 5 seconds):
-```powershell
-# Send swipe payload passing the required authentication key
-Invoke-WebRequest -Method POST http://127.0.0.1:5000/swipe `
-  -Headers @{"x-api-key"="dev-secret-api-key-12345"} `
-  -ContentType "application/json" `
-  -Body '{"employee_id":"EMP088","name":"Alice Smith"}'
+### 2. Testing 2FA Authentication Flow
+1. **Approach Camera**: Step in front of the camera.
+2. **Face Match**: Bounding box turns **Yellow** (`FACE MATCHED: AWAITING QR...`).
+3. **Admin Portal Auto-Opens**: `http://localhost:5005/admin` opens in your browser with a dynamic QR code.
+4. **Scan QR or Keycard**: Scan the QR code or tap `/keycard` swipe.
+5. **Access Granted**: Bounding box turns **Green** (`ACCESS GRANTED`), the Admin Portal page displays success and auto-closes.
+
+### 3. Running Unit Test Suite
+```bash
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-### 3. Review the Evidence Dashboard
-Open `http://localhost:5001` in your browser. The dashboard automatically pulls and displays tailgating logs, showing face-blurred screenshots and incident statistics.
+---
 
-### 4. Generate Telemetry Metrics Report
-Query the SQLite database to print an audit summary report calculating the authorized-to-tailgate ratios:
-```powershell
-python generate_metrics_report.py
-```
+## 🤝 Contributing
 
-### 5. Execute Data Retention Purge
-To clean up database logs and files older than 30 days:
-```powershell
-python src/data_retention.py
-```
+Contributions are welcome! Follow these steps to contribute:
+1. **Fork the Repository**
+2. **Create a Feature Branch**: `git checkout -b feature/amazing-feature`
+3. **Commit your changes**: `git commit -m "Add amazing feature"`
+4. **Push to branch**: `git push origin feature/amazing-feature`
+5. **Open a Pull Request**
+
+---
+
+## 📜 License
+Distributed under the **MIT License**. See `LICENSE` for details.
