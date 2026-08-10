@@ -12,6 +12,7 @@ import os
 import time
 from datetime import datetime
 import threading
+import webbrowser
 
 import cv2
 import numpy as np
@@ -38,6 +39,7 @@ from config import (
 
 from src.database import DatabaseManager
 from src.dashboard import run_dashboard_server
+from src.auth_pipeline import TwoFactorAuthenticator
 
 
 class WebcamCapture:
@@ -49,6 +51,7 @@ class WebcamCapture:
         detector=None,
         counter=None,
         controller=None,
+        authenticator=None,
     ):
         """
         Args:
@@ -56,11 +59,14 @@ class WebcamCapture:
             detector:     Optional PersonDetector (Module 2+3).
             counter:      Optional TripwireCounter (Module 4).
             controller:   Optional AccessController (Module 5).
+            authenticator: Optional TwoFactorAuthenticator (2FA Pipeline).
         """
-        self.camera_index = camera_index
-        self.detector     = detector
-        self.counter      = counter
-        self.controller   = controller
+        self.camera_index  = camera_index
+        self.detector      = detector
+        self.counter       = counter
+        self.controller    = controller
+        self.authenticator = authenticator or TwoFactorAuthenticator()
+        self.auth_states   = {} # track_id -> {"status": str, "name": str, "timestamp": float}
 
         # Tracks previous entry_count so we detect new entries each frame.
         self._prev_entry_count: int = 0
@@ -222,6 +228,9 @@ class WebcamCapture:
             print("[WebcamCapture] Headless Mode Enabled. Visual displays disabled.")
             print("[WebcamCapture] Press Ctrl+C in terminal to exit gracefully.")
 
+        # State flag to prevent opening multiple browser tabs per face recognition event
+        admin_portal_opened = False
+
         try:
             while True:
                 # Read frame.
@@ -252,6 +261,102 @@ class WebcamCapture:
 
                     if not HEADLESS_MODE:
                         self.detector.draw_boxes(frame, detections)
+
+                # Module 10: 2FA Authentication Engine (Face Recognition + QR Scan & Keycard)
+                if self.authenticator is not None and detections:
+                    # 1. Pass frame and bounding box of tracked people to verify_face()
+                    for det in detections:
+                        is_matched, emp_name = self.authenticator.verify_face(frame, det.bbox)
+                        if is_matched:
+                            self.auth_states[det.track_id] = {
+                                "status": "matched",
+                                "name": emp_name,
+                                "timestamp": time.time()
+                            }
+                            # Update controller so /admin portal generates QR code for this matched employee
+                            if self.controller is not None:
+                                self.controller.set_pending_face_match(emp_name)
+
+                            # Auto-open Admin Portal in web browser (EXACTLY ONCE per face match event)
+                            if not admin_portal_opened:
+                                port = self.controller.port if self.controller else 5000
+                                admin_url = f"http://localhost:{port}/admin"
+                                print(f"[2FA Engine] 🌐 Face Matched! Auto-opening Admin Portal: {admin_url}")
+                                webbrowser.open(admin_url)
+                                admin_portal_opened = True
+
+                    # Reset state flag when active 2FA sessions clear (timeout or QR verified)
+                    if len(self.authenticator.active_sessions) == 0:
+                        admin_portal_opened = False
+
+                    # 2. Check for QR Code scan OR mobile keycard swipe from admin route
+                    if self.authenticator.active_sessions:
+                        # Option A: Direct QR code scan from camera stream
+                        is_granted, qr_name = self.authenticator.scan_qr(frame)
+                        
+                        # Option B: Keycard swipe via Mobile Page (from Admin QR code)
+                        if not is_granted and self.controller is not None:
+                            with self.controller._lock:
+                                for swipe_rec in list(self.controller._valid_swipes):
+                                    swiped_name = swipe_rec.get("name")
+                                    if swiped_name in self.authenticator.active_sessions:
+                                        is_granted = True
+                                        qr_name = swiped_name
+                                        # Clear active session
+                                        del self.authenticator.active_sessions[swiped_name]
+                                        break
+
+                        if is_granted:
+                            # Update auth state for the corresponding employee
+                            for tid, info in list(self.auth_states.items()):
+                                if info.get("name") == qr_name:
+                                    info["status"] = "granted"
+                                    info["granted_time"] = time.time()
+                                    break
+                            else:
+                                for tid, info in list(self.auth_states.items()):
+                                    if info.get("status") == "matched":
+                                        info["status"] = "granted"
+                                        info["name"] = qr_name
+                                        info["granted_time"] = time.time()
+                                        break
+
+                    # 3. Draw 2FA bounding box overlays (Yellow for Face Match, Green for QR Grant)
+                    if not HEADLESS_MODE:
+                        now = time.time()
+                        for det in detections:
+                            info = self.auth_states.get(det.track_id)
+                            if info:
+                                x1, y1, x2, y2 = map(int, det.bbox)
+                                status = info.get("status")
+                                name = info.get("name", "")
+
+                                if status == "matched":
+                                    if (now - info.get("timestamp", 0)) <= 5.0:
+                                        # Yellow Bounding Box: FACE MATCHED: AWAITING QR...
+                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                                        cv2.putText(
+                                            frame,
+                                            f"FACE MATCHED: AWAITING QR... ({name})",
+                                            (x1, max(25, y1 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.55,
+                                            (0, 255, 255),
+                                            2
+                                        )
+                                elif status == "granted":
+                                    if (now - info.get("granted_time", now)) <= 3.0:
+                                        # Green Bounding Box: 2FA ACCESS GRANTED
+                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                                        cv2.putText(
+                                            frame,
+                                            f"ACCESS GRANTED: {name}",
+                                            (x1, max(25, y1 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.55,
+                                            (0, 255, 0),
+                                            2
+                                        )
 
                 # Module 4+9: Tripwire crossing & Optical Flow
                 if self.counter is not None:

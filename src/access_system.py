@@ -116,6 +116,7 @@ class AccessController:
 
         self._valid_swipes: deque[SwipeRecord] = deque()
         self.last_valid_swipe: Optional[SwipeRecord] = None
+        self.last_matched_employee: Optional[dict] = {"name": "Khant", "employee_id": "EMP001"}
         self._lock: threading.Lock = threading.Lock()
 
         self._app: Flask = Flask(__name__)
@@ -127,6 +128,14 @@ class AccessController:
             f"timeout={self.swipe_timeout}s | "
             f"webhook={'enabled' if self.webhook_url else 'disabled'}"
         )
+
+    def set_pending_face_match(self, employee_name: str, employee_id: str = None) -> None:
+        """Sets the last face-matched employee to dynamically update the admin QR code."""
+        with self._lock:
+            self.last_matched_employee = {
+                "name": employee_name,
+                "employee_id": employee_id or f"EMP_{employee_name[:4].upper()}"
+            }
 
     def _register_routes(self) -> None:
         """Register Flask URL routes."""
@@ -199,13 +208,19 @@ class AccessController:
             }), 200
 
         @self._app.route("/admin", methods=["GET"])
-        def admin():
+        @self._app.route("/admin/<employee_name>", methods=["GET"])
+        def admin(employee_name=None):
             from flask import render_template_string
             
-            # Generate JWT signed with JWT_SECRET containing Alice Smith's badge details
+            with self._lock:
+                emp = dict(self.last_matched_employee) if self.last_matched_employee else {"name": "Khant", "employee_id": "EMP001"}
+
+            target_name = employee_name or emp.get("name", "Khant")
+            target_id = emp.get("employee_id", "EMP001")
+
             payload = {
-                "employee_id": "EMP001",
-                "name":        "Alice Smith",
+                "employee_id": target_id,
+                "name":        target_name,
                 "iat":         int(time.time()),
             }
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -305,7 +320,7 @@ class AccessController:
 <body>
     <div class="card">
         <h1>SecureAccess Admin Onboarding</h1>
-        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>Alice Smith (EMP001)</strong>.</p>
+        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>{{ target_name }} ({{ target_id }})</strong>.</p>
         
         <div class="qr-container">
             <img class="qr-image" src="{{ qr_data_uri }}" alt="Onboarding QR Code">
@@ -319,7 +334,7 @@ class AccessController:
 </body>
 </html>
             """
-            return render_template_string(html, qr_data_uri=qr_data_uri, onboarding_url=onboarding_url)
+            return render_template_string(html, qr_data_uri=qr_data_uri, onboarding_url=onboarding_url, target_name=target_name, target_id=target_id)
 
         @self._app.route("/mobile-keycard", methods=["GET"])
         @self._app.route("/keycard", methods=["GET"])
