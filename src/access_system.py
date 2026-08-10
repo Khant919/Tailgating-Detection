@@ -128,6 +128,219 @@ class AccessController:
                 "last_valid_swipe": last,
             }), 200
 
+        @self._app.route("/mobile-keycard", methods=["GET"])
+        @self._app.route("/keycard", methods=["GET"])
+        def mobile_keycard():
+            from flask import render_template_string
+            
+            # Retrieve the API key to supply to our front-end client
+            api_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
+            
+            html_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecureAccess Mobile Keycard</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+            box-sizing: border-box;
+            padding: 20px;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+            color: #00ff66;
+            letter-spacing: 1px;
+        }
+        p {
+            font-size: 14px;
+            color: #aaaaaa;
+            margin-bottom: 30px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 320px;
+        }
+        select {
+            background-color: #1e1e1e;
+            color: #ffffff;
+            border: 1px solid #333333;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 16px;
+            width: 100%;
+            margin-bottom: 40px;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        select:focus {
+            border-color: #00ff66;
+        }
+        .keycard-btn {
+            background: radial-gradient(circle, #2a2a2a 0%, #1e1e1e 100%);
+            border: 3px solid #333333;
+            border-radius: 50%;
+            width: 180px;
+            height: 180px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            position: relative;
+        }
+        .keycard-btn:active {
+            transform: scale(0.92);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+        }
+        .keycard-btn.granted {
+            border-color: #00ff66;
+            background: radial-gradient(circle, #0c3e1e 0%, #061c0e 100%);
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.3);
+        }
+        .keycard-btn.error {
+            border-color: #ff3333;
+            background: radial-gradient(circle, #3e0c0c 0%, #1c0606 100%);
+            box-shadow: 0 0 25px rgba(255, 51, 51, 0.3);
+        }
+        .icon {
+            font-size: 32px;
+            margin-bottom: 8px;
+            transition: transform 0.2s;
+        }
+        .btn-text {
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            color: #dddddd;
+            transition: color 0.2s;
+        }
+        .keycard-btn.granted .btn-text {
+            color: #00ff66;
+        }
+        .keycard-btn.error .btn-text {
+            color: #ff3333;
+        }
+        .status-msg {
+            margin-top: 25px;
+            font-size: 14px;
+            min-height: 20px;
+            color: #888888;
+            transition: color 0.2s;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SecureAccess</h1>
+        <p>Virtual Mobile Keycard Badge</p>
+        
+        <select id="employee-select">
+            <option value="EMP001|Alice Smith">EMP001 - Alice Smith</option>
+            <option value="EMP002|Bob Jones">EMP002 - Bob Jones</option>
+        </select>
+        
+        <button id="unlock-btn" class="keycard-btn">
+            <span class="icon" id="btn-icon">💳</span>
+            <span class="btn-text" id="btn-label">TAP TO UNLOCK</span>
+        </button>
+        
+        <div id="status-display" class="status-msg">Select credentials and tap reader.</div>
+    </div>
+
+    <script>
+        const unlockBtn = document.getElementById('unlock-btn');
+        const empSelect = document.getElementById('employee-select');
+        const statusDisplay = document.getElementById('status-display');
+        const btnIcon = document.getElementById('btn-icon');
+        const btnLabel = document.getElementById('btn-label');
+
+        let isTransacting = false;
+
+        unlockBtn.addEventListener('click', async () => {
+            if (isTransacting) return;
+            
+            isTransacting = true;
+            statusDisplay.textContent = 'Transmitting credentials...';
+            statusDisplay.style.color = '#aaaaaa';
+            
+            // Extract credentials from select element
+            const [empId, empName] = empSelect.value.split('|');
+            
+            try {
+                const response = await fetch('/swipe', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-api-key': '{{ api_key }}'
+                    },
+                    body: JSON.stringify({
+                        employee_id: empId,
+                        name: empName
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Success UI Feedback
+                    unlockBtn.classList.add('granted');
+                    btnIcon.textContent = '✅';
+                    btnLabel.textContent = 'ACCESS GRANTED';
+                    statusDisplay.textContent = 'Credentials verified. Entry window open!';
+                    statusDisplay.style.color = '#00ff66';
+                } else {
+                    // Fail UI Feedback
+                    unlockBtn.classList.add('error');
+                    btnIcon.textContent = '❌';
+                    btnLabel.textContent = 'ACCESS DENIED';
+                    statusDisplay.textContent = data.message || 'Verification failed.';
+                    statusDisplay.style.color = '#ff3333';
+                }
+            } catch (err) {
+                // Connection Error UI Feedback
+                unlockBtn.classList.add('error');
+                btnIcon.textContent = '⚠️';
+                btnLabel.textContent = 'CONNECT ERROR';
+                statusDisplay.textContent = 'Network error: Cannot reach Flask server.';
+                statusDisplay.style.color = '#ff3333';
+            }
+
+            // Reset button feedback state after 3 seconds
+            setTimeout(() => {
+                unlockBtn.className = 'keycard-btn';
+                btnIcon.textContent = '💳';
+                btnLabel.textContent = 'TAP TO UNLOCK';
+                statusDisplay.textContent = 'Select credentials and tap reader.';
+                statusDisplay.style.color = '#888888';
+                isTransacting = false;
+            }, 3000);
+        });
+    </script>
+</body>
+</html>
+            """
+            return render_template_string(html_template, api_key=api_key)
+
     def start_server(self) -> None:
         """
         Launch Flask in a background daemon thread. Returns immediately.

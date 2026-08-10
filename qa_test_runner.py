@@ -14,17 +14,80 @@ import os
 import sys
 import time
 import cv2
+import numpy as np
 import requests
 
 from config import (
     HEADLESS_MODE,
     PROCESS_EVERY_N_FRAMES,
     SCREENSHOT_DIR,
+    TRACK_COLORS,
 )
 from src.access_system import AccessController
 from src.counter import TripwireCounter
 from src.detector import PersonDetector
 from src.database import DatabaseManager
+
+
+def draw_radar_map_overlay(frame: np.ndarray, detections, counter) -> None:
+    """Helper to render a bird's-eye view radar map overlay in the QA output."""
+    h, w = frame.shape[:2]
+    src_pts = np.float32([
+        [int(0.35 * w), int(0.4 * h)],
+        [int(0.65 * w), int(0.4 * h)],
+        [int(0.9 * w),  int(0.95 * h)],
+        [int(0.1 * w),  int(0.95 * h)]
+    ])
+    dst_pts = np.float32([
+        [10, 10],
+        [140, 10],
+        [140, 190],
+        [10, 190]
+    ])
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    
+    overlay = frame.copy()
+    x_offset, y_offset = 10, h - 210
+    
+    # Semi-transparent map backing
+    cv2.rectangle(overlay, (x_offset, y_offset), (x_offset + 150, y_offset + 200), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (x_offset, y_offset), (x_offset + 150, y_offset + 200), (0, 255, 0), 1)
+    cv2.rectangle(overlay, (x_offset + 10, y_offset + 10), (x_offset + 140, y_offset + 190), (80, 80, 80), 1)
+    
+    # Draw perspective tripwire
+    trip_y = counter.tripwire_y
+    trip_x_left, trip_x_right = 50, 600
+    denom_l = (M[2, 0] * trip_x_left + M[2, 1] * trip_y + M[2, 2])
+    denom_r = (M[2, 0] * trip_x_right + M[2, 1] * trip_y + M[2, 2])
+    if denom_l != 0 and denom_r != 0:
+        plx = int((M[0, 0] * trip_x_left + M[0, 1] * trip_y + M[0, 2]) / denom_l)
+        ply = int((M[1, 0] * trip_x_left + M[1, 1] * trip_y + M[1, 2]) / denom_l)
+        prx = int((M[0, 0] * trip_x_right + M[0, 1] * trip_y + M[0, 2]) / denom_r)
+        pry = int((M[1, 0] * trip_x_right + M[1, 1] * trip_y + M[1, 2]) / denom_r)
+        cv2.line(overlay, (x_offset + plx, y_offset + ply), (x_offset + prx, y_offset + pry), (0, 0, 255), 2)
+        cv2.putText(overlay, "TRIPWIRE", (x_offset + plx + 5, y_offset + ply - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+
+    cv2.putText(overlay, "RADAR MINI-MAP", (x_offset + 15, y_offset + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+
+    # Plot tracks
+    for det in detections:
+        track_id = det.track_id
+        if track_id < 0:
+            continue
+        x1, y1, x2, y2 = det.bbox
+        cx = (x1 + x2) // 2
+        cy = y2
+        
+        denom = (M[2, 0] * cx + M[2, 1] * cy + M[2, 2])
+        if denom != 0:
+            px = int((M[0, 0] * cx + M[0, 1] * cy + M[0, 2]) / denom)
+            py = int((M[1, 0] * cx + M[1, 1] * cy + M[1, 2]) / denom)
+            if 0 <= px <= 150 and 0 <= py <= 200:
+                color = TRACK_COLORS[abs(track_id) % len(TRACK_COLORS)]
+                cv2.circle(overlay, (x_offset + px, y_offset + py), 5, color, -1)
+                cv2.putText(overlay, f"ID {track_id}", (x_offset + px + 6, y_offset + py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
 
 def run_qa_test(video_path: str):
@@ -123,7 +186,7 @@ def run_qa_test(video_path: str):
                 detections = last_detections
 
             # Run counting logic
-            counter.process_crossing(detections)
+            counter.process_crossing(detections, frame)
 
             # Check for new entry crossing
             new_entries = counter.entry_count - prev_entry_count
@@ -159,6 +222,9 @@ def run_qa_test(video_path: str):
                 cv2.line(frame, (line_x, 0), (line_x, h), (0, 0, 255), 2) # Tripwire
                 detector.draw_boxes(frame, detections)
                 counter.draw_tripwire(frame)
+                
+                # Draw the homography radar mini-map overlay
+                draw_radar_map_overlay(frame, detections, counter)
                 
                 # Show video window
                 cv2.imshow("QA Test Runner - Processing (Press 'q' to stop)", frame)

@@ -18,6 +18,13 @@ Simulate a card swipe (while main.py is running):
       -Body '{"employee_id":"EMP001","name":"Alice Smith"}'
 """
 
+import sys
+import io
+
+# Force line-buffering and UTF-8 encoding so print statements flush instantly on Windows
+sys.stdout.reconfigure(line_buffering=True, encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(line_buffering=True, encoding='utf-8', errors='replace')
+
 from src.access_system import AccessController
 from src.counter import TripwireCounter
 from src.detector import PersonDetector
