@@ -40,6 +40,38 @@ class AccessControllerTests(unittest.TestCase):
         self.assertEqual(second_result['status'], 'tailgate')
         self.assertEqual(second_result['host_employee']['employee_id'], 'EMP9999')
 
+    def test_swipe_jwt_token_validation(self):
+        import jwt
+        from config import JWT_SECRET
+        
+        controller = AccessController(port=5003, swipe_timeout=5)
+        client = controller._app.test_client()
+
+        # 1. Test valid JWT authentication
+        payload = {'employee_id': 'EMP001', 'name': 'Alice Smith'}
+        token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+        
+        response = client.post(
+            '/swipe',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['status'], 'ok')
+        
+        result = controller.check_for_tailgate()
+        self.assertEqual(result['status'], 'authorized')
+        self.assertEqual(result['employee']['employee_id'], 'EMP001')
+        self.assertEqual(result['employee']['name'], 'Alice Smith')
+
+        # 2. Test invalid JWT signature authentication
+        bad_token = jwt.encode(payload, "wrong-secret-key", algorithm='HS256')
+        response_bad = client.post(
+            '/swipe',
+            headers={'Authorization': f'Bearer {bad_token}'}
+        )
+        self.assertEqual(response_bad.status_code, 401)
+        self.assertEqual(response_bad.get_json()['status'], 'error')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -115,13 +115,16 @@ COUNTER_EXIT_COLOR     = (0, 0, 220)    # Red
 # ---------------------------------------------------------------------------
 
 # How long (in seconds) a card swipe remains valid after it is registered
-SWIPE_TIMEOUT_SECONDS = 5
+SWIPE_TIMEOUT_SECONDS = 10
 
 # Port for local Flask HTTP API
 FLASK_PORT = 5005
 
 # Webhook URL for external alert notifications (Slack / Teams / webhook.site)
 WEBHOOK_URL = "https://webhook.site/your-unique-id-here"
+
+# JWT secret key for signing and verifying employee onboarding tokens
+JWT_SECRET = "super-secret-key-for-demo-onboarding-badges-long-key-32chars"
 
 # ---------------------------------------------------------------------------
 # Module 7: Optimization & QA Testing
