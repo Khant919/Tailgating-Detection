@@ -23,13 +23,59 @@ import time
 from collections import deque
 from functools import wraps
 from typing import Optional
+import socket
+import jwt
+import qrcode
+import io
+import base64
 
 import requests
 from flask import Flask, jsonify, request
 
-from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL
+from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL, JWT_SECRET
 
 SwipeRecord = dict   # type alias for readability
+
+
+def _get_local_ip(request_host: Optional[str] = None) -> str:
+    """Get the most appropriate local Wi-Fi/LAN IP address of the laptop."""
+    # 1. If the admin portal was accessed via a specific IP, prioritize using that IP directly
+    if request_host:
+        host_ip = request_host.split(":")[0]
+        if host_ip not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+            import re
+            if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host_ip):
+                return host_ip
+
+    # 2. Otherwise, query all active network adapter IPs and choose the physical LAN adapter
+    try:
+        hostname = socket.gethostname()
+        ips = socket.gethostbyname_ex(hostname)[2]
+        
+        # Prioritize 192.168.100.x subnet (user's active LAN subnet)
+        for ip in ips:
+            if ip.startswith("192.168.100."):
+                return ip
+                
+        # Fallback to other 192.168.x.x subnets
+        for ip in ips:
+            if ip.startswith("192.168."):
+                return ip
+                
+        # Fallback to other private classes (excluding common hypervisor switches)
+        for ip in ips:
+            if ip.startswith("172.") or ip.startswith("10."):
+                if not ip.startswith("172.17.") and not ip.startswith("172.18.") and not ip.startswith("172.31."):
+                    return ip
+
+        # Fallback to standard connection route test
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 def require_api_key(f):
@@ -86,17 +132,41 @@ class AccessController:
         """Register Flask URL routes."""
 
         @self._app.route("/swipe", methods=["POST"])
-        @require_api_key
         def swipe():
-            body: dict = {}
-            if request.is_json:
-                body = request.get_json(silent=True) or {}
-
-            record: SwipeRecord = {
-                "employee_id": body.get("employee_id", "UNKNOWN"),
-                "name":        body.get("name",        "Unknown Employee"),
-                "timestamp":   time.time(),
-            }
+            auth_header = request.headers.get("Authorization")
+            provided_api_key = request.headers.get("x-api-key")
+            
+            record = None
+            
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                try:
+                    payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+                    record = {
+                        "employee_id": payload.get("employee_id", "UNKNOWN"),
+                        "name":        payload.get("name",        "Unknown Employee"),
+                        "timestamp":   time.time(),
+                    }
+                except jwt.ExpiredSignatureError:
+                    return jsonify({"status": "error", "message": "Badge registration has expired."}), 401
+                except jwt.InvalidTokenError:
+                    return jsonify({"status": "error", "message": "Invalid security badge credentials."}), 401
+            elif provided_api_key:
+                # Fallback support for existing API key tests
+                secret_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
+                if provided_api_key != secret_key:
+                    return jsonify({"status": "error", "message": "Unauthorized. Invalid x-api-key header."}), 401
+                
+                body = {}
+                if request.is_json:
+                    body = request.get_json(silent=True) or {}
+                record = {
+                    "employee_id": body.get("employee_id", "UNKNOWN"),
+                    "name":        body.get("name",        "Unknown Employee"),
+                    "timestamp":   time.time(),
+                }
+            else:
+                return jsonify({"status": "error", "message": "Unauthorized. Missing authentication credentials."}), 401
 
             with self._lock:
                 self._valid_swipes.append(record)
@@ -128,13 +198,133 @@ class AccessController:
                 "last_valid_swipe": last,
             }), 200
 
+        @self._app.route("/admin", methods=["GET"])
+        def admin():
+            from flask import render_template_string
+            
+            # Generate JWT signed with JWT_SECRET containing Alice Smith's badge details
+            payload = {
+                "employee_id": "EMP001",
+                "name":        "Alice Smith",
+                "iat":         int(time.time()),
+            }
+            token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+            
+            # Construct Wi-Fi URL for the mobile badge reader dynamically
+            local_ip = _get_local_ip(request_host=request.host)
+            onboarding_url = f"http://{local_ip}:{self.port}/keycard?token={token}"
+            
+            # Generate QR Code in memory as a base64 Data URI
+            qr = qrcode.QRCode(version=1, box_size=8, border=4)
+            qr.add_data(onboarding_url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            buf = io.BytesIO()
+            img.save(buf)
+            qr_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            qr_data_uri = f"data:image/png;base64,{qr_base64}"
+            
+            html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecureAccess Onboarding Admin Portal</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .card {
+            background-color: #1e1e1e;
+            border: 1px solid #333333;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            max-width: 450px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.6);
+        }
+        h1 {
+            color: #00ff66;
+            margin-top: 0;
+            font-size: 22px;
+            letter-spacing: 0.5px;
+        }
+        p {
+            color: #aaaaaa;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-bottom: 25px;
+        }
+        .qr-container {
+            background-color: white;
+            padding: 15px;
+            border-radius: 8px;
+            display: inline-block;
+            margin-bottom: 25px;
+        }
+        .qr-image {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        .url-box {
+            background-color: #121212;
+            border: 1px solid #333333;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            word-break: break-all;
+            color: #00ff66;
+            text-align: left;
+            margin-bottom: 10px;
+        }
+        .label {
+            font-size: 11px;
+            color: #777777;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+            text-align: left;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>SecureAccess Admin Onboarding</h1>
+        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>Alice Smith (EMP001)</strong>.</p>
+        
+        <div class="qr-container">
+            <img class="qr-image" src="{{ qr_data_uri }}" alt="Onboarding QR Code">
+        </div>
+        
+        <span class="label">Local Activation Link:</span>
+        <div class="url-box">
+            <a href="{{ onboarding_url }}" style="color: #00ff66; text-decoration: none;">{{ onboarding_url }}</a>
+        </div>
+    </div>
+</body>
+</html>
+            """
+            return render_template_string(html, qr_data_uri=qr_data_uri, onboarding_url=onboarding_url)
+
         @self._app.route("/mobile-keycard", methods=["GET"])
         @self._app.route("/keycard", methods=["GET"])
         def mobile_keycard():
             from flask import render_template_string
-            
-            # Retrieve the API key to supply to our front-end client
-            api_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
             
             html_template = """
 <!DOCTYPE html>
@@ -176,29 +366,13 @@ class AccessController:
             width: 100%;
             max-width: 320px;
         }
-        select {
-            background-color: #1e1e1e;
-            color: #ffffff;
-            border: 1px solid #333333;
-            border-radius: 8px;
-            padding: 12px;
-            font-size: 16px;
-            width: 100%;
-            margin-bottom: 40px;
-            outline: none;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-        select:focus {
-            border-color: #00ff66;
-        }
         .keycard-btn {
             background: radial-gradient(circle, #2a2a2a 0%, #1e1e1e 100%);
             border: 3px solid #333333;
             border-radius: 50%;
             width: 180px;
             height: 180px;
-            display: flex;
+            display: none; /* Hidden until badge registered */
             flex-direction: column;
             align-items: center;
             justify-content: center;
@@ -247,6 +421,19 @@ class AccessController:
             color: #888888;
             transition: color 0.2s;
         }
+        .unauthorized-card {
+            border: 2px dashed #ff3333;
+            background-color: rgba(255, 51, 51, 0.05);
+            border-radius: 12px;
+            padding: 30px 20px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .unauthorized-card h2 {
+            color: #ff3333;
+            margin-top: 0;
+            font-size: 18px;
+        }
     </style>
 </head>
 <body>
@@ -254,70 +441,104 @@ class AccessController:
         <h1>SecureAccess</h1>
         <p>Virtual Mobile Keycard Badge</p>
         
-        <select id="employee-select">
-            <option value="EMP001|Alice Smith">EMP001 - Alice Smith</option>
-            <option value="EMP002|Bob Jones">EMP002 - Bob Jones</option>
-        </select>
+        <div id="unauthorized-view" class="unauthorized-card">
+            <h2>⚠️ Access Blocked</h2>
+            <p style="margin-bottom: 0;">No security badge found on this device. Please scan your administrator's onboarding QR code to register credentials.</p>
+        </div>
         
         <button id="unlock-btn" class="keycard-btn">
             <span class="icon" id="btn-icon">💳</span>
             <span class="btn-text" id="btn-label">TAP TO UNLOCK</span>
         </button>
         
-        <div id="status-display" class="status-msg">Select credentials and tap reader.</div>
+        <div id="status-display" class="status-msg"></div>
     </div>
 
     <script>
         const unlockBtn = document.getElementById('unlock-btn');
-        const empSelect = document.getElementById('employee-select');
+        const unauthorizedView = document.getElementById('unauthorized-view');
         const statusDisplay = document.getElementById('status-display');
         const btnIcon = document.getElementById('btn-icon');
         const btnLabel = document.getElementById('btn-label');
 
+        // Helper to parse JWT payload on client side
+        function parseJwt(token) {
+            try {
+                return JSON.parse(atob(token.split('.')[1]));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // On Page Load: Handle dynamic token check & registration
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+
+        if (urlToken) {
+            // Save the incoming token to local storage
+            localStorage.setItem('auth_token', urlToken);
+            // Clean up the URL query parameters so the token is hidden from view
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        const storedToken = localStorage.getItem('auth_token');
+        const userPayload = storedToken ? parseJwt(storedToken) : null;
+
+        if (userPayload) {
+            // Setup active view
+            unauthorizedView.style.display = 'none';
+            unlockBtn.style.display = 'flex';
+            statusDisplay.textContent = `Badge Active: ${userPayload.name} (${userPayload.employee_id})`;
+            statusDisplay.style.color = '#00ff66';
+        } else {
+            // Setup inactive view
+            unauthorizedView.style.display = 'block';
+            unlockBtn.style.display = 'none';
+        }
+
         let isTransacting = false;
 
         unlockBtn.addEventListener('click', async () => {
-            if (isTransacting) return;
+            if (isTransacting || !storedToken) return;
             
             isTransacting = true;
-            statusDisplay.textContent = 'Transmitting credentials...';
+            statusDisplay.textContent = 'Transmitting badge credentials...';
             statusDisplay.style.color = '#aaaaaa';
-            
-            // Extract credentials from select element
-            const [empId, empName] = empSelect.value.split('|');
             
             try {
                 const response = await fetch('/swipe', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'x-api-key': '{{ api_key }}'
-                    },
-                    body: JSON.stringify({
-                        employee_id: empId,
-                        name: empName
-                    })
+                        'Authorization': `Bearer ${storedToken}`
+                    }
                 });
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    // Success UI Feedback
                     unlockBtn.classList.add('granted');
                     btnIcon.textContent = '✅';
                     btnLabel.textContent = 'ACCESS GRANTED';
-                    statusDisplay.textContent = 'Credentials verified. Entry window open!';
+                    statusDisplay.textContent = 'Badge verified. Entry window open!';
                     statusDisplay.style.color = '#00ff66';
+                    
+                    // Consume the onboarding badge token immediately on successful swipe
+                    localStorage.removeItem('auth_token');
                 } else {
-                    // Fail UI Feedback
                     unlockBtn.classList.add('error');
                     btnIcon.textContent = '❌';
                     btnLabel.textContent = 'ACCESS DENIED';
                     statusDisplay.textContent = data.message || 'Verification failed.';
                     statusDisplay.style.color = '#ff3333';
+                    
+                    if (response.status === 401) {
+                        // Clear invalid/expired token
+                        localStorage.removeItem('auth_token');
+                        setTimeout(() => { window.location.reload(); }, 2500);
+                    }
                 }
             } catch (err) {
-                // Connection Error UI Feedback
                 unlockBtn.classList.add('error');
                 btnIcon.textContent = '⚠️';
                 btnLabel.textContent = 'CONNECT ERROR';
@@ -327,19 +548,31 @@ class AccessController:
 
             // Reset button feedback state after 3 seconds
             setTimeout(() => {
-                unlockBtn.className = 'keycard-btn';
-                btnIcon.textContent = '💳';
-                btnLabel.textContent = 'TAP TO UNLOCK';
-                statusDisplay.textContent = 'Select credentials and tap reader.';
-                statusDisplay.style.color = '#888888';
-                isTransacting = false;
+                const currentToken = localStorage.getItem('auth_token');
+                if (currentToken) {
+                    // Reset to active/unlock state if token is still present
+                    unlockBtn.className = 'keycard-btn';
+                    btnIcon.textContent = '💳';
+                    btnLabel.textContent = 'TAP TO UNLOCK';
+                    if (userPayload) {
+                        statusDisplay.textContent = `Badge Active: ${userPayload.name} (${userPayload.employee_id})`;
+                        statusDisplay.style.color = '#00ff66';
+                    }
+                    isTransacting = false;
+                } else {
+                    // Revert to unauthorized view (token was consumed/cleared)
+                    unauthorizedView.style.display = 'block';
+                    unlockBtn.style.display = 'none';
+                    statusDisplay.textContent = '';
+                    isTransacting = false;
+                }
             }, 3000);
         });
     </script>
 </body>
 </html>
             """
-            return render_template_string(html_template, api_key=api_key)
+            return render_template_string(html_template)
 
     def start_server(self) -> None:
         """

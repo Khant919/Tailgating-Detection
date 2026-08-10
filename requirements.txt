@@ -6,3 +6,5 @@ ultralytics>=8.0.0
 opencv-python
 flask
 requests
+PyJWT>=2.8.0
+qrcode[pil]>=7.4.2
