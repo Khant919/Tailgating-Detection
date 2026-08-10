@@ -37,6 +37,39 @@ from config import (
     TRACK_COLORS,
 )
 
+import sys
+
+# Audio alarm imports (Windows winsound support)
+try:
+    import winsound
+except ImportError:
+    winsound = None
+
+
+def play_alarm_sound() -> None:
+    """
+    Plays an audible breach alarm chime safely without blocking the video pipeline.
+    Uses winsound.Beep on Windows, with a terminal bell fallback for non-Windows platforms.
+    """
+    try:
+        if sys.platform == "win32" and winsound is not None:
+            # Play a 2000Hz frequency beep for 500ms
+            winsound.Beep(2000, 500)
+        else:
+            # Fallback for Linux / macOS: Terminal bell ASCII character \a
+            print("\a", end="", flush=True)
+    except Exception as err:
+        print(f"[Alarm] Could not play alarm sound: {err}")
+
+
+def trigger_breach_alarm() -> None:
+    """
+    Spawns a non-blocking daemon thread to play the breach alarm sound.
+    Ensures zero impact on OpenCV video frame rate (prevents video freezing).
+    """
+    threading.Thread(target=play_alarm_sound, daemon=True, name="BreachAlarmThread").start()
+
+
 from src.database import DatabaseManager
 from src.dashboard import run_dashboard_server
 from src.auth_pipeline import TwoFactorAuthenticator
@@ -279,9 +312,9 @@ class WebcamCapture:
 
                             # Auto-open Admin Portal in web browser (EXACTLY ONCE per face match event)
                             if not admin_portal_opened:
-                                port = self.controller.port if self.controller else 5000
+                                port = self.controller.port if self.controller else 5005
                                 admin_url = f"http://localhost:{port}/admin"
-                                print(f"[2FA Engine] 🌐 Face Matched! Auto-opening Admin Portal: {admin_url}")
+                                print(f"[2FA Engine] 🌐 Face Matched ({emp_name})! Opening Admin Portal: {admin_url}")
                                 webbrowser.open(admin_url)
                                 admin_portal_opened = True
 
@@ -357,6 +390,9 @@ class WebcamCapture:
                                             (0, 255, 0),
                                             2
                                         )
+                                    else:
+                                        # Reset state for track_id so process starts from beginning (Face Scan)
+                                        self.auth_states.pop(det.track_id, None)
 
                 # Module 4+9: Tripwire crossing & Optical Flow
                 if self.counter is not None:
@@ -372,6 +408,9 @@ class WebcamCapture:
                             result = self.controller.check_for_tailgate()
 
                             if result["status"] == "tailgate":
+                                # Trigger non-blocking audio alarm chime
+                                trigger_breach_alarm()
+
                                 host = result.get("host_employee")
                                 if host:
                                     print(
