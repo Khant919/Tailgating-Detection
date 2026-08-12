@@ -459,33 +459,47 @@ class WebcamCapture:
                             # specific track that crossed, so one person's swipe cannot
                             # authorise somebody else walking through.
                             crossing_track = event["track_id"]
-                            auth_info = self.auth_states.get(crossing_track) or {}
-                            authenticated_name = (
-                                auth_info.get("name")
-                                if auth_info.get("status") == "granted"
-                                else None
-                            )
+                            is_occluded = event.get("occluded", False)
+
+                            if is_occluded:
+                                # A person found hidden inside another's bounding
+                                # box: no track, no face match, and they must not
+                                # be able to consume the host's swipe.
+                                authenticated_name = None
+                            else:
+                                auth_info = self.auth_states.get(crossing_track) or {}
+                                authenticated_name = (
+                                    auth_info.get("name")
+                                    if auth_info.get("status") == "granted"
+                                    else None
+                                )
 
                             # Returns dict: {"status":"authorized"|"tailgate", ...}
                             result = self.controller.check_for_tailgate(
-                                authenticated_name=authenticated_name
+                                authenticated_name=authenticated_name,
+                                allow_card_only=not is_occluded,
                             )
 
                             if result["status"] == "tailgate":
                                 # Trigger non-blocking audio alarm chime
                                 trigger_breach_alarm()
 
+                                cause = (
+                                    f"Hidden person inside box of ID {crossing_track}"
+                                    if is_occluded
+                                    else f"Track ID {crossing_track} unverified"
+                                )
                                 host = result.get("host_employee")
                                 if host:
                                     print(
-                                        f"🚨 TAILGATE DETECTED 🚨 | Track ID {crossing_track} "
-                                        f"unverified | Probable host: {host['name']} "
+                                        f"🚨 TAILGATE DETECTED 🚨 | {cause} | "
+                                        f"Probable host: {host['name']} "
                                         f"({host['employee_id']})"
                                     )
                                 else:
                                     print(
-                                        f"🚨 TAILGATE DETECTED 🚨 | Track ID {crossing_track} "
-                                        f"unverified | No prior swipe on record"
+                                        f"🚨 TAILGATE DETECTED 🚨 | {cause} | "
+                                        f"No prior swipe on record"
                                     )
 
                                 # Module 6+8: Capture and log the tailgate event
@@ -504,7 +518,11 @@ class WebcamCapture:
                                 # Log event to database
                                 # Store image_path relative to workspace root (e.g., 'screenshots/1723000000.jpg')
                                 db_image_path = f"screenshots/{timestamp_filename}"
-                                self.db.log_event('Tailgate Detected', db_image_path)
+                                self.db.log_event(
+                                    'Tailgate Detected (Occluded)' if is_occluded
+                                    else 'Tailgate Detected',
+                                    db_image_path,
+                                )
                             else:
                                 emp = result.get("employee", {})
                                 print(
