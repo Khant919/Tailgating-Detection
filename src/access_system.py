@@ -20,7 +20,6 @@ Thread-safety:
 import os
 import threading
 import time
-import datetime
 from collections import deque
 from functools import wraps
 from typing import Optional
@@ -32,8 +31,6 @@ import base64
 
 import requests
 from flask import Flask, jsonify, request
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 
 from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL, JWT_SECRET
 
@@ -119,19 +116,11 @@ class AccessController:
 
         self._valid_swipes: deque[SwipeRecord] = deque()
         self.last_valid_swipe: Optional[SwipeRecord] = None
-        self.last_matched_employee: Optional[dict] = {"name": "Khant", "employee_id": "EMP001"}
+        self._pending_face_match: Optional[str] = None
         self._lock: threading.Lock = threading.Lock()
 
         self._app: Flask = Flask(__name__)
         self._app.logger.disabled = True
-
-        # Initialize API rate limiter for DDoS and brute-force protection
-        self.limiter = Limiter(
-            get_remote_address,
-            app=self._app,
-            default_limits=["200 per day", "50 per hour"]
-        )
-
         self._register_routes()
 
         print(
@@ -140,19 +129,10 @@ class AccessController:
             f"webhook={'enabled' if self.webhook_url else 'disabled'}"
         )
 
-    def set_pending_face_match(self, employee_name: str, employee_id: str = None) -> None:
-        """Sets the last face-matched employee to dynamically update the admin QR code."""
-        with self._lock:
-            self.last_matched_employee = {
-                "name": employee_name,
-                "employee_id": employee_id or f"EMP_{employee_name[:4].upper()}"
-            }
-
     def _register_routes(self) -> None:
         """Register Flask URL routes."""
 
         @self._app.route("/swipe", methods=["POST"])
-        @self.limiter.limit("5 per second")
         def swipe():
             auth_header = request.headers.get("Authorization")
             provided_api_key = request.headers.get("x-api-key")
@@ -169,7 +149,7 @@ class AccessController:
                         "timestamp":   time.time(),
                     }
                 except jwt.ExpiredSignatureError:
-                    return jsonify({"status": "denied", "reason": "QR Code Expired"}), 401
+                    return jsonify({"status": "error", "message": "Badge registration has expired."}), 401
                 except jwt.InvalidTokenError:
                     return jsonify({"status": "error", "message": "Invalid security badge credentials."}), 401
             elif provided_api_key:
@@ -220,22 +200,23 @@ class AccessController:
             }), 200
 
         @self._app.route("/admin", methods=["GET"])
-        @self._app.route("/admin/<employee_name>", methods=["GET"])
-        @self.limiter.limit("10 per minute")
-        def admin(employee_name=None):
+        def admin():
             from flask import render_template_string
             
             with self._lock:
-                emp = dict(self.last_matched_employee) if self.last_matched_employee else {"name": "Khant", "employee_id": "EMP001"}
-
-            target_name = employee_name or emp.get("name", "Khant")
-            target_id = emp.get("employee_id", "EMP001")
-
+                name = self._pending_face_match or "Alice Smith"
+            
+            if name == "Alice Smith":
+                employee_id = "EMP001"
+            else:
+                clean_name = "".join(c for c in name if c.isalnum()).upper()
+                employee_id = f"EMP-{clean_name}"
+            
+            # Generate JWT signed with JWT_SECRET containing employee's badge details
             payload = {
-                "employee_id": target_id,
-                "name":        target_name,
+                "employee_id": employee_id,
+                "name":        name,
                 "iat":         int(time.time()),
-                "exp":         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60),
             }
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
             
@@ -250,7 +231,7 @@ class AccessController:
             img = qr.make_image(fill_color="black", back_color="white")
             
             buf = io.BytesIO()
-            img.save(buf)
+            img.save(buf, format="PNG")
             qr_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
             qr_data_uri = f"data:image/png;base64,{qr_base64}"
             
@@ -334,7 +315,7 @@ class AccessController:
 <body>
     <div class="card">
         <h1>SecureAccess Admin Onboarding</h1>
-        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>{{ target_name }} ({{ target_id }})</strong>.</p>
+        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>{{ name }} ({{ employee_id }})</strong>.</p>
         
         <div class="qr-container">
             <img class="qr-image" src="{{ qr_data_uri }}" alt="Onboarding QR Code">
@@ -345,36 +326,16 @@ class AccessController:
             <a href="{{ onboarding_url }}" style="color: #00ff66; text-decoration: none;">{{ onboarding_url }}</a>
         </div>
     </div>
-
-    <script>
-        // Auto-close Admin Portal when employee entry is verified
-        let closed = false;
-        setInterval(async () => {
-            if (closed) return;
-            try {
-                const res = await fetch('/status');
-                const data = await res.json();
-                if (data.last_valid_swipe) {
-                    const elapsed = (Date.now() / 1000) - data.last_valid_swipe.timestamp;
-                    if (elapsed <= 6.0) {
-                        closed = true;
-                        document.querySelector('.card').innerHTML = `
-                            <h1 style="color: #00ff66; margin-top: 10px;">✅ ACCESS GRANTED</h1>
-                            <p style="color: #ffffff; font-size: 16px; margin: 15px 0;">Entry Verified for <strong>${data.last_valid_swipe.name}</strong>!</p>
-                            <p style="font-size: 12px; color: #888888;">Closing window...</p>
-                        `;
-                        setTimeout(() => {
-                            window.close();
-                        }, 1200);
-                    }
-                }
-            } catch (e) {}
-        }, 1000);
-    </script>
 </body>
 </html>
             """
-            return render_template_string(html, qr_data_uri=qr_data_uri, onboarding_url=onboarding_url, target_name=target_name, target_id=target_id)
+            return render_template_string(
+                html,
+                qr_data_uri=qr_data_uri,
+                onboarding_url=onboarding_url,
+                name=name,
+                employee_id=employee_id
+            )
 
         @self._app.route("/mobile-keycard", methods=["GET"])
         @self._app.route("/keycard", methods=["GET"])
@@ -601,7 +562,7 @@ class AccessController:
                 statusDisplay.style.color = '#ff3333';
             }
 
-            // Reset button feedback state after 3 seconds
+            // Reset button feedback state after 10 seconds
             setTimeout(() => {
                 const currentToken = localStorage.getItem('auth_token');
                 if (currentToken) {
@@ -762,3 +723,8 @@ class AccessController:
                 1 for r in self._valid_swipes
                 if now - r["timestamp"] <= self.swipe_timeout
             )
+
+    def set_pending_face_match(self, name: str) -> None:
+        """Update the pending face match name so the /admin portal can generate a QR code for them."""
+        with self._lock:
+            self._pending_face_match = name
