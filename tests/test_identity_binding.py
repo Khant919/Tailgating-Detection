@@ -23,14 +23,14 @@ class CrossingEventTests(unittest.TestCase):
         self.counter.process_crossing([_Det(7, cy=200)])
         events = self.counter.process_crossing([_Det(7, cy=400)])
 
-        self.assertEqual(events, [{"track_id": 7, "direction": "entry"}])
+        self.assertEqual(events, [{"track_id": 7, "direction": "entry", "occluded": False}])
         self.assertEqual(self.counter.entry_count, 1)
 
     def test_exit_event_carries_track_id(self):
         self.counter.process_crossing([_Det(3, cy=400)])
         events = self.counter.process_crossing([_Det(3, cy=200)])
 
-        self.assertEqual(events, [{"track_id": 3, "direction": "exit"}])
+        self.assertEqual(events, [{"track_id": 3, "direction": "exit", "occluded": False}])
         self.assertEqual(self.counter.exit_count, 1)
 
     def test_no_event_without_crossing(self):

@@ -217,5 +217,27 @@ MAX_SINGLE_PERSON_AREA_RATIO = 0.45
 # Absolute fallback used only until the first frame is seen.
 MAX_SINGLE_PERSON_AREA = int(640 * 480 * MAX_SINGLE_PERSON_AREA_RATIO)
 
+# --- Occupancy estimation (how many people are inside one merged box) ---------
+# Two people walking shoulder-to-shoulder are often detected as a single box.
+# Width/height ratio is the most reliable cheap signal because it is scale
+# invariant: a person twice as close has twice the width AND twice the height,
+# so the ratio holds, while raw area does not.
+#
+# A single standing adult occupies roughly this width-to-height ratio.
+SINGLE_PERSON_ASPECT_RATIO = 0.45
+
+# A box is treated as holding more than one person once it is this much wider
+# than a single person, relative to its height.
+OCCLUSION_ASPECT_MULTIPLIER = 1.6
+
+# Sanity cap: never infer more than this many people from one box.
+MAX_OCCUPANCY_PER_BOX = 3
+
+# Occupancy is judged over a short window of frames rather than a single frame,
+# so one noisy detection cannot inflate the count. The box must look merged in
+# at least MIN_OCCLUSION_FRAMES of the last OCCLUSION_MEMORY_FRAMES frames.
+OCCLUSION_MEMORY_FRAMES = 6
+MIN_OCCLUSION_FRAMES    = 2
+
 # Minimum optical flow velocity split divergence threshold (pixels/frame) to flag tailgating occlusion.
 OPTICAL_FLOW_SPLIT_THRESHOLD = 12.0

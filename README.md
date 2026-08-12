@@ -70,6 +70,26 @@ mode and logs the entry as unverified.
 - **Data Retention Purge**: `src/data_retention.py` scrubs database records and screenshot evidence older than 30 days, and now runs automatically at every startup as well as standalone.
 - **No biometric data in version control**: `known_faces/` and `screenshots/` are gitignored. Never commit photographs of real people.
 
+### 5b. 👥 Occlusion-Aware Counting
+Two people walking shoulder-to-shoulder are often detected as a **single** bounding box —
+the classic way a tailgater slips through a people counter. Each box is therefore resolved
+into a headcount before its crossing is counted:
+
+- **Width-to-height ratio** is the primary signal, because it is scale invariant: someone
+  standing twice as close grows in both dimensions, so the ratio is unchanged, while raw
+  pixel area is not comparable between near and far people.
+- **Optical flow** inside the box confirms a merge when the point velocities separate into
+  two diverging clusters (split at the largest gap, not at zero, so noise around a
+  stationary mean is not mistaken for two people).
+- **Box area** relative to the frame acts as a third check.
+
+A merge must be visible in several frames before it inflates the count, so one noisy
+detection cannot manufacture a phantom person. When a merged box crosses, the tracked
+person gets a normal entry event and **each hidden person gets their own entry event
+flagged as occluded**. An occluded entry has no track and no authentication, and is barred
+from consuming anyone else's swipe — so it always resolves to a tailgate, logged as
+`Tailgate Detected (Occluded)`.
+
 ### 6. 📐 Resolution-Independent Tripwire
 The counting line and the occlusion threshold are derived from frame-relative ratios and
 calibrated on the first frame, so the same config works on 480p, 720p and 1080p cameras.

@@ -645,7 +645,11 @@ class AccessController:
                 "flow needs LAN access. Set TAILGATE_BIND_HOST=0.0.0.0 on a trusted network."
             )
 
-    def check_for_tailgate(self, authenticated_name: Optional[str] = None) -> dict:
+    def check_for_tailgate(
+        self,
+        authenticated_name: Optional[str] = None,
+        allow_card_only: bool = True,
+    ) -> dict:
         """
         Determine whether a new entry crossing was authorised or a tailgate.
 
@@ -653,6 +657,10 @@ class AccessController:
             authenticated_name: Name of the employee whose 2FA session belongs to
                 the tracked person that actually crossed the tripwire, or None if
                 that person never authenticated.
+            allow_card_only: When False, a queued swipe cannot authorise this
+                crossing on its own. Used for people found hidden inside another
+                person's bounding box: they have no track and no authentication,
+                so they must never consume somebody else's swipe.
 
         Identity binding: when authenticated_name is given, only a swipe recorded
         for that same employee authorises the crossing. Without it, any queued
@@ -690,7 +698,7 @@ class AccessController:
                         f"'{authenticated_name}' has no matching swipe "
                         f"({len(self._valid_swipes)} swipe(s) queued for others)"
                     )
-            elif self._valid_swipes:
+            elif allow_card_only and self._valid_swipes:
                 # No 2FA session for the crossing person. Card-only mode: the swipe
                 # authorises the entry, but nothing proves the swiper is the walker.
                 record = self._valid_swipes.popleft()
