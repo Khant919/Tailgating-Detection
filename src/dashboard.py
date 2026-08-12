@@ -1,15 +1,20 @@
 """
 Module 6: Security Dashboard UI
 ===============================
-Provides a lightweight Flask server on port 5001.
+Provides a lightweight Flask server (default port 5001, see TAILGATE_DASHBOARD_PORT).
 Renders a premium, dark-mode security console for real-time guard review.
 Features responsive layouts, incident telemetry, and interactive evidence viewing.
 """
 
+import hmac
 import os
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, send_from_directory, jsonify
+from functools import wraps
+
+from flask import Flask, Response, render_template_string, request, send_from_directory, jsonify
+
+from config import BIND_HOST, DASHBOARD_PASSWORD, DASHBOARD_PORT, DASHBOARD_USER
 from src.database import DatabaseManager
 
 # Setup screenshot directory relative to project root
@@ -19,6 +24,30 @@ SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "screenshots")
 # Create Flask app instance
 app = Flask(__name__)
 db_manager = DatabaseManager()
+
+
+def require_dashboard_auth(f):
+    """
+    HTTP Basic Auth guard for the evidence dashboard.
+
+    Every route here exposes breach screenshots of identifiable people, so the
+    dashboard must never be readable without credentials.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if (
+            auth is None
+            or not hmac.compare_digest(auth.username or "", DASHBOARD_USER)
+            or not hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD)
+        ):
+            return Response(
+                "Authentication required.",
+                401,
+                {"WWW-Authenticate": 'Basic realm="SecureAccess Evidence Dashboard"'},
+            )
+        return f(*args, **kwargs)
+    return decorated
 
 # HTML template with premium dark-mode, glassmorphism, responsive grid, and custom JS features.
 DASHBOARD_HTML = """
@@ -387,7 +416,7 @@ DASHBOARD_HTML = """
         <div class="telemetry-grid">
             <div class="telemetry-card">
                 <span class="telemetry-label">Monitoring Port</span>
-                <span class="telemetry-value" style="color: var(--accent-blue);">5001</span>
+                <span class="telemetry-value" style="color: var(--accent-blue);">{{ dashboard_port }}</span>
             </div>
             <div class="telemetry-card danger">
                 <span class="telemetry-label">Total Infractions</span>
@@ -509,6 +538,7 @@ DASHBOARD_HTML = """
 """
 
 @app.route("/")
+@require_dashboard_auth
 def dashboard_home():
     """Fetches the latest 50 logged events and renders the dashboard UI."""
     events = db_manager.get_recent_events(limit=50)
@@ -528,9 +558,12 @@ def dashboard_home():
             "status": ev["status"],
             "image_path": ev["image_path"]
         })
-    return render_template_string(DASHBOARD_HTML, events=formatted_events)
+    return render_template_string(
+        DASHBOARD_HTML, events=formatted_events, dashboard_port=DASHBOARD_PORT
+    )
 
 @app.route("/screenshots/<path:filename>")
+@require_dashboard_auth
 def serve_screenshot(filename):
     """
     Serves the screenshot image files from the screenshots/ directory.
@@ -541,13 +574,13 @@ def serve_screenshot(filename):
     return send_from_directory(SCREENSHOTS_DIR, base_name)
 
 def run_dashboard_server():
-    """Starts the Flask app on port 5001. Suppresses default terminal logging."""
+    """Starts the Flask app on the configured host/port. Suppresses default terminal logging."""
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     
-    print("[Dashboard] Starting Flask server on port 5001...")
-    app.run(host="0.0.0.0", port=5001, debug=False, use_reloader=False, threaded=True)
+    print(f"[Dashboard] Starting Flask server on http://{BIND_HOST}:{DASHBOARD_PORT} (auth required)...")
+    app.run(host=BIND_HOST, port=DASHBOARD_PORT, debug=False, use_reloader=False, threaded=True)
 
 if __name__ == "__main__":
     # Test execution

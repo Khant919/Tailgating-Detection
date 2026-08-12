@@ -1,7 +1,12 @@
 """
 Project configuration values for Tailgating Detection System (Modules 1 - 5).
 All tunable constants live here — never hardcode values in other modules.
+
+Secrets (JWT signing key, API key, webhook URL) are read from environment
+variables; see the Module 5 section below.
 """
+
+import os
 
 # ---------------------------------------------------------------------------
 # Module 1: Webcam Capture & Display
@@ -88,9 +93,18 @@ TRACK_LABEL_THICKNESS    = 2
 # Module 4: Directional Counting — Virtual Tripwire
 # ---------------------------------------------------------------------------
 
-# Coordinates for the horizontal virtual line (x, y)
+# Coordinates for the horizontal virtual line (x, y).
+# These are the 640x480 fallbacks used only until the first frame arrives; the
+# counter rescales itself to the real frame size using the ratios below, so the
+# line lands in the same relative place on a 720p or 1080p camera.
 TRIPWIRE_START = (50, 300)
 TRIPWIRE_END   = (600, 300)
+
+# Tripwire position as a fraction of frame height/width (derived from the
+# 640x480 pixel values above: 300/480, 50/640, 600/640).
+TRIPWIRE_Y_RATIO       = 0.625
+TRIPWIRE_X_START_RATIO = 0.078
+TRIPWIRE_X_END_RATIO   = 0.9375
 
 # Line colors (BGR)
 TRIPWIRE_COLOR_DEFAULT = (255, 100, 0)   # Blue (idle)
@@ -120,11 +134,68 @@ SWIPE_TIMEOUT_SECONDS = 10
 # Port for local Flask HTTP API
 FLASK_PORT = 5005
 
-# Webhook URL for external alert notifications (Slack / Teams / webhook.site)
-WEBHOOK_URL = "https://webhook.site/your-unique-id-here"
+# Lifetime of a dynamic QR badge token. Short by design: the QR is rendered on a
+# screen, so anyone who photographs it holds a valid credential until it expires.
+BADGE_TOKEN_TTL_SECONDS = 60
 
-# JWT secret key for signing and verifying employee onboarding tokens
-JWT_SECRET = "super-secret-key-for-demo-onboarding-badges-long-key-32chars"
+# Rate limits protecting the access API from brute-force and replay floods.
+RATE_LIMIT_SWIPE   = "5 per second"
+RATE_LIMIT_ADMIN   = "10 per minute"
+RATE_LIMIT_DEFAULT = ["200 per day", "50 per hour"]
+
+# Webhook URL for external alert notifications (Slack / Teams / webhook.site).
+# Set TAILGATE_WEBHOOK_URL to enable; alerts are skipped while it is unset.
+WEBHOOK_URL = os.environ.get("TAILGATE_WEBHOOK_URL", "")
+
+# Secrets are read from the environment. The development fallbacks below let the
+# demo run out of the box, but they are published in this repository and are
+# therefore public — anyone can forge a badge token with them. Set both
+# TAILGATE_JWT_SECRET and TAILGATE_API_KEY before running this anywhere real.
+#
+#   PowerShell:  $env:TAILGATE_JWT_SECRET = "<random 32+ char string>"
+#   bash:        export TAILGATE_JWT_SECRET="<random 32+ char string>"
+#
+# Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(48))"
+DEV_JWT_SECRET = "insecure-development-only-jwt-secret-do-not-use-in-production"
+DEV_API_KEY    = "insecure-development-only-api-key"
+
+DEV_DASHBOARD_PASSWORD = "insecure-development-only-dashboard-password"
+
+JWT_SECRET = os.environ.get("TAILGATE_JWT_SECRET", DEV_JWT_SECRET)
+API_KEY    = os.environ.get("TAILGATE_API_KEY", DEV_API_KEY)
+
+# Credentials guarding the evidence dashboard (HTTP Basic Auth). The dashboard
+# serves breach screenshots containing people's faces, so it must not be open.
+DASHBOARD_USER     = os.environ.get("TAILGATE_DASHBOARD_USER", "guard")
+DASHBOARD_PASSWORD = os.environ.get("TAILGATE_DASHBOARD_PASSWORD", DEV_DASHBOARD_PASSWORD)
+
+# Port for the evidence dashboard
+DASHBOARD_PORT = int(os.environ.get("TAILGATE_DASHBOARD_PORT", "5001"))
+
+# Bind address for the Flask servers. Defaults to loopback so the access API and
+# the evidence dashboard are not exposed to the local network. Override with
+# TAILGATE_BIND_HOST="0.0.0.0" only behind a trusted network or reverse proxy.
+BIND_HOST = os.environ.get("TAILGATE_BIND_HOST", "127.0.0.1")
+
+
+def warn_on_insecure_secrets() -> None:
+    """Print a loud startup warning when the public development secrets are active."""
+    insecure = []
+    if JWT_SECRET == DEV_JWT_SECRET:
+        insecure.append("TAILGATE_JWT_SECRET")
+    if API_KEY == DEV_API_KEY:
+        insecure.append("TAILGATE_API_KEY")
+    if DASHBOARD_PASSWORD == DEV_DASHBOARD_PASSWORD:
+        insecure.append("TAILGATE_DASHBOARD_PASSWORD")
+
+    if insecure:
+        print("=" * 70)
+        print("⚠️  SECURITY WARNING: using public development secrets for:")
+        for name in insecure:
+            print(f"      - {name}")
+        print("   These values are committed to the repository and are not secret.")
+        print("   Set them in the environment before any real deployment.")
+        print("=" * 70)
 
 # ---------------------------------------------------------------------------
 # Module 7: Optimization & QA Testing
@@ -136,8 +207,37 @@ HEADLESS_MODE = False
 # Process only every N-th frame to halve CPU load; reuse previous tracking data for skipped frames.
 PROCESS_EVERY_N_FRAMES = 2
 
-# Maximum expected bounding box area for a single person. Exceeding this flags potential occlusion (merged boxes).
-MAX_SINGLE_PERSON_AREA = 350000
+# Maximum expected bounding box area for a single person, as a fraction of the
+# frame area. Exceeding it flags potential occlusion (two people merged into one
+# box). Expressed as a ratio because a fixed pixel value is meaningless across
+# resolutions — the previous absolute 350000 px exceeded an entire 640x480 frame
+# (307200 px), so the check could never fire.
+MAX_SINGLE_PERSON_AREA_RATIO = 0.45
+
+# Absolute fallback used only until the first frame is seen.
+MAX_SINGLE_PERSON_AREA = int(640 * 480 * MAX_SINGLE_PERSON_AREA_RATIO)
+
+# --- Occupancy estimation (how many people are inside one merged box) ---------
+# Two people walking shoulder-to-shoulder are often detected as a single box.
+# Width/height ratio is the most reliable cheap signal because it is scale
+# invariant: a person twice as close has twice the width AND twice the height,
+# so the ratio holds, while raw area does not.
+#
+# A single standing adult occupies roughly this width-to-height ratio.
+SINGLE_PERSON_ASPECT_RATIO = 0.45
+
+# A box is treated as holding more than one person once it is this much wider
+# than a single person, relative to its height.
+OCCLUSION_ASPECT_MULTIPLIER = 1.6
+
+# Sanity cap: never infer more than this many people from one box.
+MAX_OCCUPANCY_PER_BOX = 3
+
+# Occupancy is judged over a short window of frames rather than a single frame,
+# so one noisy detection cannot inflate the count. The box must look merged in
+# at least MIN_OCCLUSION_FRAMES of the last OCCLUSION_MEMORY_FRAMES frames.
+OCCLUSION_MEMORY_FRAMES = 6
+MIN_OCCLUSION_FRAMES    = 2
 
 # Minimum optical flow velocity split divergence threshold (pixels/frame) to flag tailgating occlusion.
 OPTICAL_FLOW_SPLIT_THRESHOLD = 12.0

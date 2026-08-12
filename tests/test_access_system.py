@@ -1,6 +1,7 @@
 import unittest
 import time
 
+from config import API_KEY
 from src.access_system import AccessController
 
 
@@ -12,7 +13,7 @@ class AccessControllerTests(unittest.TestCase):
         response = client.post(
             '/swipe',
             json={'employee_id': 'EMP1234', 'name': 'Alice Smith'},
-            headers={'x-api-key': 'dev-secret-api-key-12345'}
+            headers={'x-api-key': API_KEY}
         )
 
         self.assertEqual(response.status_code, 200)
@@ -30,7 +31,7 @@ class AccessControllerTests(unittest.TestCase):
         client.post(
             '/swipe', 
             json={'employee_id': 'EMP9999', 'name': 'Bob Jones'},
-            headers={'x-api-key': 'dev-secret-api-key-12345'}
+            headers={'x-api-key': API_KEY}
         )
         first_result = controller.check_for_tailgate()
         self.assertEqual(first_result['status'], 'authorized')

@@ -101,8 +101,6 @@ class WebcamCapture:
         self.authenticator = authenticator or TwoFactorAuthenticator()
         self.auth_states   = {} # track_id -> {"status": str, "name": str, "timestamp": float}
 
-        # Tracks previous entry_count so we detect new entries each frame.
-        self._prev_entry_count: int = 0
 
         # Module 7: Performance variables
         self.frame_count: int = 0
@@ -124,9 +122,12 @@ class WebcamCapture:
         self.db = DatabaseManager()
 
         self.dashboard_thread = None
-        
+
         # Module 9: Perspective transform matrix
         self.M = None
+
+        # Module 8: Haar Cascade for GDPR face blurring — loaded lazily on first breach.
+        self._face_cascade = None
 
     def _get_homography_matrix(self, w: int, h: int) -> np.ndarray:
         """
@@ -171,6 +172,56 @@ class WebcamCapture:
             except Exception as e:
                 print(f"[WebcamCapture] [Download] Error: Failed to download Haar Cascade: {e}")
         return local_path.replace("\\", "/")
+
+    def _get_face_cascade(self) -> cv2.CascadeClassifier | None:
+        """
+        Lazily loads the Haar Cascade face classifier used for GDPR blurring.
+        Returns None if the cascade could not be loaded, so blurring degrades
+        gracefully into a skipped screenshot rather than crashing the loop.
+        """
+        if self._face_cascade is None:
+            cascade_path = self._ensure_cascade_file()
+            cascade = cv2.CascadeClassifier(cascade_path)
+            if cascade.empty():
+                print(f"[WebcamCapture] Error: Could not load Haar Cascade from {cascade_path}.")
+                return None
+            self._face_cascade = cascade
+        return self._face_cascade
+
+    def _blur_faces(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Module 8: GDPR compliance — applies a 51x51 Gaussian blur over every
+        detected face before the frame is written to disk as breach evidence.
+
+        Operates on a copy so the live display frame keeps unblurred faces for
+        the on-screen guard view.
+
+        Args:
+            frame: BGR frame to anonymise.
+
+        Returns:
+            A new frame with all detected face regions blurred.
+        """
+        cascade = self._get_face_cascade()
+        if cascade is None:
+            # Fail closed: without a working cascade we cannot guarantee
+            # anonymisation, so return a fully blurred frame rather than
+            # writing identifiable faces to disk.
+            print("[WebcamCapture] Warning: Cascade unavailable — blurring entire frame.")
+            return cv2.GaussianBlur(frame, (51, 51), 0)
+
+        anonymised = frame.copy()
+        gray = cv2.cvtColor(anonymised, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+        for (x, y, w, h) in faces:
+            roi = anonymised[y:y + h, x:x + w]
+            if roi.size == 0:
+                continue
+            anonymised[y:y + h, x:x + w] = cv2.GaussianBlur(roi, (51, 51), 0)
+
+        print(f"[WebcamCapture] GDPR: Blurred {len(faces)} face(s) in evidence screenshot.")
+        return anonymised
 
     def _draw_radar_map(self, frame: np.ndarray, detections) -> None:
         """Plots tracked people onto a bird's-eye 2D view displayed as a radar map."""
@@ -396,32 +447,59 @@ class WebcamCapture:
 
                 # Module 4+9: Tripwire crossing & Optical Flow
                 if self.counter is not None:
-                    self.counter.process_crossing(detections, frame)
+                    crossing_events = self.counter.process_crossing(detections, frame)
 
-                    # Module 5: Tailgate check — fires once per new entry.
+                    # Module 5: Tailgate check — fires once per entry crossing.
                     if self.controller is not None:
-                        new_entries = (
-                            self.counter.entry_count - self._prev_entry_count
-                        )
-                        for _ in range(new_entries):
+                        entry_events = [
+                            ev for ev in crossing_events if ev["direction"] == "entry"
+                        ]
+                        for event in entry_events:
+                            # Identity binding: authorise using the 2FA session of the
+                            # specific track that crossed, so one person's swipe cannot
+                            # authorise somebody else walking through.
+                            crossing_track = event["track_id"]
+                            is_occluded = event.get("occluded", False)
+
+                            if is_occluded:
+                                # A person found hidden inside another's bounding
+                                # box: no track, no face match, and they must not
+                                # be able to consume the host's swipe.
+                                authenticated_name = None
+                            else:
+                                auth_info = self.auth_states.get(crossing_track) or {}
+                                authenticated_name = (
+                                    auth_info.get("name")
+                                    if auth_info.get("status") == "granted"
+                                    else None
+                                )
+
                             # Returns dict: {"status":"authorized"|"tailgate", ...}
-                            result = self.controller.check_for_tailgate()
+                            result = self.controller.check_for_tailgate(
+                                authenticated_name=authenticated_name,
+                                allow_card_only=not is_occluded,
+                            )
 
                             if result["status"] == "tailgate":
                                 # Trigger non-blocking audio alarm chime
                                 trigger_breach_alarm()
 
+                                cause = (
+                                    f"Hidden person inside box of ID {crossing_track}"
+                                    if is_occluded
+                                    else f"Track ID {crossing_track} unverified"
+                                )
                                 host = result.get("host_employee")
                                 if host:
                                     print(
-                                        f"🚨 TAILGATE DETECTED 🚨 | "
+                                        f"🚨 TAILGATE DETECTED 🚨 | {cause} | "
                                         f"Probable host: {host['name']} "
                                         f"({host['employee_id']})"
                                     )
                                 else:
                                     print(
-                                        "🚨 TAILGATE DETECTED 🚨 | "
-                                        "No prior swipe on record"
+                                        f"🚨 TAILGATE DETECTED 🚨 | {cause} | "
+                                        f"No prior swipe on record"
                                     )
 
                                 # Module 6+8: Capture and log the tailgate event
@@ -429,7 +507,10 @@ class WebcamCapture:
                                 timestamp_filename = f"{int(time.time())}.jpg"
                                 saved_image_path = os.path.join(self.screenshot_dir, timestamp_filename)
 
-                                if cv2.imwrite(saved_image_path, frame):
+                                # Module 8: Anonymise faces before persisting evidence
+                                evidence_frame = self._blur_faces(frame)
+
+                                if cv2.imwrite(saved_image_path, evidence_frame):
                                     print(f"[WebcamCapture] Saved evidence screenshot: {saved_image_path}")
                                 else:
                                     print(f"[WebcamCapture] Error saving screenshot to: {saved_image_path}")
@@ -437,7 +518,11 @@ class WebcamCapture:
                                 # Log event to database
                                 # Store image_path relative to workspace root (e.g., 'screenshots/1723000000.jpg')
                                 db_image_path = f"screenshots/{timestamp_filename}"
-                                self.db.log_event('Tailgate Detected', db_image_path)
+                                self.db.log_event(
+                                    'Tailgate Detected (Occluded)' if is_occluded
+                                    else 'Tailgate Detected',
+                                    db_image_path,
+                                )
                             else:
                                 emp = result.get("employee", {})
                                 print(
@@ -447,9 +532,6 @@ class WebcamCapture:
                                 )
                                 # Log authorized entry in SQLite database for reporting
                                 self.db.log_event(f"Authorized Entry: {emp.get('name', 'Unknown')}", "")
-
-                    # Keep entry count in sync.
-                    self._prev_entry_count = self.counter.entry_count
 
                     # Draw tripwire line + IN/OUT overlay (skipped if headless)
                     if not HEADLESS_MODE:

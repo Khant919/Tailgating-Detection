@@ -17,6 +17,7 @@ Thread-safety:
   Thread C — Webhook thread     (reads immutable event_data dict — no lock needed)
 """
 
+import hmac
 import os
 import threading
 import time
@@ -32,7 +33,21 @@ import base64
 import requests
 from flask import Flask, jsonify, request
 
-from config import FLASK_PORT, SWIPE_TIMEOUT_SECONDS, WEBHOOK_URL, JWT_SECRET
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+from config import (
+    API_KEY,
+    BADGE_TOKEN_TTL_SECONDS,
+    BIND_HOST,
+    FLASK_PORT,
+    JWT_SECRET,
+    RATE_LIMIT_ADMIN,
+    RATE_LIMIT_DEFAULT,
+    RATE_LIMIT_SWIPE,
+    SWIPE_TIMEOUT_SECONDS,
+    WEBHOOK_URL,
+)
 
 SwipeRecord = dict   # type alias for readability
 
@@ -83,13 +98,12 @@ def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         # Fetch the system key from the environment, using a secure fallback for local dev
-        secret_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
-        
         # Retrieve the key provided by the client
         provided_key = request.headers.get("x-api-key")
-        
-        if not provided_key or provided_key != secret_key:
-            print(f"[AccessController] 🔐 Blocked Unauthorized Access: x-api-key='{provided_key}'")
+
+        if not provided_key or not hmac.compare_digest(provided_key, API_KEY):
+            # Never log the submitted credential itself.
+            print("[AccessController] 🔐 Blocked unauthorized request: missing or invalid x-api-key.")
             return jsonify({
                 "status": "error",
                 "message": "Unauthorized. Missing or invalid x-api-key header."
@@ -121,6 +135,14 @@ class AccessController:
 
         self._app: Flask = Flask(__name__)
         self._app.logger.disabled = True
+
+        # Rate limiting shields the badge endpoints from brute-force and replay floods.
+        self.limiter = Limiter(
+            get_remote_address,
+            app=self._app,
+            default_limits=RATE_LIMIT_DEFAULT,
+        )
+
         self._register_routes()
 
         print(
@@ -133,6 +155,7 @@ class AccessController:
         """Register Flask URL routes."""
 
         @self._app.route("/swipe", methods=["POST"])
+        @self.limiter.limit(RATE_LIMIT_SWIPE)
         def swipe():
             auth_header = request.headers.get("Authorization")
             provided_api_key = request.headers.get("x-api-key")
@@ -154,8 +177,7 @@ class AccessController:
                     return jsonify({"status": "error", "message": "Invalid security badge credentials."}), 401
             elif provided_api_key:
                 # Fallback support for existing API key tests
-                secret_key = os.environ.get("TAILGATE_API_KEY", "dev-secret-api-key-12345")
-                if provided_api_key != secret_key:
+                if not hmac.compare_digest(provided_api_key, API_KEY):
                     return jsonify({"status": "error", "message": "Unauthorized. Invalid x-api-key header."}), 401
                 
                 body = {}
@@ -200,6 +222,7 @@ class AccessController:
             }), 200
 
         @self._app.route("/admin", methods=["GET"])
+        @self.limiter.limit(RATE_LIMIT_ADMIN)
         def admin():
             from flask import render_template_string
             
@@ -212,11 +235,15 @@ class AccessController:
                 clean_name = "".join(c for c in name if c.isalnum()).upper()
                 employee_id = f"EMP-{clean_name}"
             
-            # Generate JWT signed with JWT_SECRET containing employee's badge details
+            # Generate JWT signed with JWT_SECRET containing employee's badge details.
+            # The exp claim is what makes the QR safe to display on screen: a token
+            # photographed off the monitor stops working after BADGE_TOKEN_TTL_SECONDS.
+            issued_at = int(time.time())
             payload = {
                 "employee_id": employee_id,
                 "name":        name,
-                "iat":         int(time.time()),
+                "iat":         issued_at,
+                "exp":         issued_at + BADGE_TOKEN_TTL_SECONDS,
             }
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
             
@@ -597,7 +624,7 @@ class AccessController:
         self.server_thread = threading.Thread(
             target=self._app.run,
             kwargs={
-                "host":         "0.0.0.0",
+                "host":         BIND_HOST,
                 "port":         self.port,
                 "debug":        False,
                 "use_reloader": False,
@@ -610,12 +637,36 @@ class AccessController:
 
         print(
             f"[AccessController] 🚀 Flask server started on "
-            f"http://127.0.0.1:{self.port}  (daemon thread)"
+            f"http://{BIND_HOST}:{self.port}  (daemon thread)"
         )
+        if BIND_HOST == "127.0.0.1":
+            print(
+                "[AccessController] ℹ️  Bound to loopback — the phone QR / mobile keycard "
+                "flow needs LAN access. Set TAILGATE_BIND_HOST=0.0.0.0 on a trusted network."
+            )
 
-    def check_for_tailgate(self) -> dict:
+    def check_for_tailgate(
+        self,
+        authenticated_name: Optional[str] = None,
+        allow_card_only: bool = True,
+    ) -> dict:
         """
         Determine whether a new entry crossing was authorised or a tailgate.
+
+        Args:
+            authenticated_name: Name of the employee whose 2FA session belongs to
+                the tracked person that actually crossed the tripwire, or None if
+                that person never authenticated.
+            allow_card_only: When False, a queued swipe cannot authorise this
+                crossing on its own. Used for people found hidden inside another
+                person's bounding box: they have no track and no authentication,
+                so they must never consume somebody else's swipe.
+
+        Identity binding: when authenticated_name is given, only a swipe recorded
+        for that same employee authorises the crossing. Without it, any queued
+        swipe would authorise any body — which is precisely the tailgating case
+        this system exists to catch. A swipe belonging to somebody else is left in
+        the queue for its rightful owner rather than consumed here.
         """
         now = time.time()
 
@@ -633,10 +684,31 @@ class AccessController:
                 else:
                     break
 
-            # Authorised entry
-            if self._valid_swipes:
+            # Authorised entry — select the swipe belonging to the person who crossed.
+            record = None
+            if authenticated_name is not None:
+                for candidate in self._valid_swipes:
+                    if candidate.get("name") == authenticated_name:
+                        record = candidate
+                        self._valid_swipes.remove(candidate)
+                        break
+                if record is None and self._valid_swipes:
+                    print(
+                        f"[AccessController] ⛔ Identity mismatch | crossing by "
+                        f"'{authenticated_name}' has no matching swipe "
+                        f"({len(self._valid_swipes)} swipe(s) queued for others)"
+                    )
+            elif allow_card_only and self._valid_swipes:
+                # No 2FA session for the crossing person. Card-only mode: the swipe
+                # authorises the entry, but nothing proves the swiper is the walker.
                 record = self._valid_swipes.popleft()
-                age    = now - record["timestamp"]
+                print(
+                    "[AccessController] ⚠️  Unbound entry | swipe consumed without a "
+                    "face match — identity of the person crossing is unverified."
+                )
+
+            if record is not None:
+                age = now - record["timestamp"]
                 self.last_valid_swipe = record
                 print(
                     f"[AccessController] ✅ Authorised | "
