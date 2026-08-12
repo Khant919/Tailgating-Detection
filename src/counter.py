@@ -25,7 +25,11 @@ from config import (
     TRIPWIRE_FLASH_FRAMES,
     TRIPWIRE_START,
     TRIPWIRE_THICKNESS,
+    TRIPWIRE_X_END_RATIO,
+    TRIPWIRE_X_START_RATIO,
+    TRIPWIRE_Y_RATIO,
     MAX_SINGLE_PERSON_AREA,
+    MAX_SINGLE_PERSON_AREA_RATIO,
     OPTICAL_FLOW_SPLIT_THRESHOLD,
 )
 
@@ -38,12 +42,31 @@ class TripwireCounter:
 
     def __init__(
         self,
-        tripwire_start: tuple[int, int] = TRIPWIRE_START,
-        tripwire_end:   tuple[int, int] = TRIPWIRE_END,
+        tripwire_start: tuple[int, int] | None = None,
+        tripwire_end:   tuple[int, int] | None = None,
     ):
+        """
+        Args:
+            tripwire_start: Explicit (x, y) start of the line. When omitted the
+                line is positioned from frame-relative ratios on the first frame,
+                so the same config works on 480p, 720p and 1080p cameras.
+            tripwire_end: Explicit (x, y) end of the line.
+
+        Passing either argument pins the line to those exact pixels and disables
+        the automatic rescaling.
+        """
+        self._auto_scale: bool = tripwire_start is None and tripwire_end is None
+        self._frame_size: tuple[int, int] | None = None
+
+        tripwire_start = tripwire_start or TRIPWIRE_START
+        tripwire_end   = tripwire_end   or TRIPWIRE_END
+
         self.tripwire_start: tuple[int, int] = tripwire_start
         self.tripwire_end:   tuple[int, int] = tripwire_end
         self.tripwire_y:     int             = tripwire_start[1]
+
+        # Occlusion threshold in pixels; rescaled once the frame size is known.
+        self.max_person_area: int = MAX_SINGLE_PERSON_AREA
 
         # Counters
         self.entry_count: int = 0
@@ -60,6 +83,33 @@ class TripwireCounter:
         # Module 9: Optical Flow tracking state
         self._prev_gray = None
         self._flow_pts = None
+
+    def configure_for_frame(self, width: int, height: int) -> None:
+        """
+        Rescale the tripwire and the occlusion threshold to the real frame size.
+
+        Called automatically on the first frame (and again if the resolution
+        changes). No-op when explicit pixel coordinates were supplied.
+        """
+        if self._frame_size == (width, height):
+            return
+        self._frame_size = (width, height)
+
+        # The occlusion threshold is always frame-relative, even with a pinned line.
+        self.max_person_area = int(width * height * MAX_SINGLE_PERSON_AREA_RATIO)
+
+        if not self._auto_scale:
+            return
+
+        y = int(height * TRIPWIRE_Y_RATIO)
+        self.tripwire_start = (int(width * TRIPWIRE_X_START_RATIO), y)
+        self.tripwire_end   = (int(width * TRIPWIRE_X_END_RATIO), y)
+        self.tripwire_y     = y
+
+        print(
+            f"[TripwireCounter] Calibrated for {width}x{height} | "
+            f"line y={y} | occlusion threshold={self.max_person_area} px"
+        )
 
     def _calculate_iou(self, box1: tuple[int, int, int, int], box2: tuple[int, int, int, int]) -> float:
         """Helper to calculate the Intersection over Union (IoU) of two boxes."""
@@ -84,11 +134,24 @@ class TripwireCounter:
             
         return intersection_area / union_area
 
-    def process_crossing(self, detections, frame=None) -> None:
+    def process_crossing(self, detections, frame=None) -> list[dict]:
         """
         Analyse tracked detections, check for crossings, and run optical flow
         occlusion recovery if overlaps are detected.
+
+        Returns:
+            A list of crossing events in the order they occurred, each shaped
+            {"track_id": int, "direction": "entry" | "exit"}. Callers need the
+            track_id — not just a count — to tell *which* tracked person crossed,
+            so an entry can be matched against that person's own authentication.
         """
+        events: list[dict] = []
+
+        # Rescale the line to this camera's resolution before evaluating crossings.
+        if frame is not None:
+            h, w = frame.shape[:2]
+            self.configure_for_frame(w, h)
+
         # Run crossing updates
         for det in detections:
             track_id = det.track_id
@@ -102,10 +165,10 @@ class TripwireCounter:
 
             # Occlusion Check: Flag if bounding box area suddenly exceeds a normal single-person area
             box_area = (x2 - x1) * (y2 - y1)
-            if box_area > MAX_SINGLE_PERSON_AREA:
+            if box_area > self.max_person_area:
                 print(
                     f"[TripwireCounter] ⚠️ WARNING: Potential Merged Box / Occlusion Detected! "
-                    f"ID: {track_id} | Area: {box_area} px (Threshold: {MAX_SINGLE_PERSON_AREA} px)"
+                    f"ID: {track_id} | Area: {box_area} px (Threshold: {self.max_person_area} px)"
                 )
 
             if track_id not in self.track_history:
@@ -125,6 +188,7 @@ class TripwireCounter:
                     self.entry_count += 1
                     self.crossed_ids[track_id] = "entry"
                     self._trigger_flash("entry")
+                    events.append({"track_id": track_id, "direction": "entry"})
                     print(
                         f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
                         f"center_y {prev_cy} → {curr_cy} | "
@@ -137,6 +201,7 @@ class TripwireCounter:
                     self.exit_count += 1
                     self.crossed_ids[track_id] = "exit"
                     self._trigger_flash("exit")
+                    events.append({"track_id": track_id, "direction": "exit"})
                     print(
                         f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
                         f"center_y {prev_cy} → {curr_cy} | "
@@ -155,6 +220,8 @@ class TripwireCounter:
         # Module 9: Optical Flow Occlusion Recovery
         if frame is not None:
             self._process_optical_flow(frame, detections)
+
+        return events
 
     def _process_optical_flow(self, frame: np.ndarray, detections) -> None:
         """Runs Lucas-Kanade optical flow inside highly overlapping bounding boxes."""

@@ -25,8 +25,10 @@ import io
 sys.stdout.reconfigure(line_buffering=True, encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(line_buffering=True, encoding='utf-8', errors='replace')
 
+from config import warn_on_insecure_secrets
 from src.access_system import AccessController
 from src.counter import TripwireCounter
+from src.data_retention import enforce_data_retention
 from src.detector import PersonDetector
 from src.live_capture import WebcamCapture
 
@@ -35,6 +37,16 @@ if __name__ == "__main__":
     print("=" * 65)
     print("      TAILGATING DETECTION SYSTEM (Modules 1 - 5)")
     print("=" * 65)
+
+    # 0. Refuse to start quietly with published development secrets.
+    warn_on_insecure_secrets()
+
+    # 0b. Enforce the retention policy at startup, so evidence older than the
+    # policy window is purged even if the standalone script is never run.
+    try:
+        enforce_data_retention()
+    except Exception as exc:
+        print(f"[main] Data retention sweep failed (continuing): {exc}")
 
     # 1. PersonDetector (Module 2+3)
     try:

@@ -101,8 +101,6 @@ class WebcamCapture:
         self.authenticator = authenticator or TwoFactorAuthenticator()
         self.auth_states   = {} # track_id -> {"status": str, "name": str, "timestamp": float}
 
-        # Tracks previous entry_count so we detect new entries each frame.
-        self._prev_entry_count: int = 0
 
         # Module 7: Performance variables
         self.frame_count: int = 0
@@ -449,16 +447,29 @@ class WebcamCapture:
 
                 # Module 4+9: Tripwire crossing & Optical Flow
                 if self.counter is not None:
-                    self.counter.process_crossing(detections, frame)
+                    crossing_events = self.counter.process_crossing(detections, frame)
 
-                    # Module 5: Tailgate check — fires once per new entry.
+                    # Module 5: Tailgate check — fires once per entry crossing.
                     if self.controller is not None:
-                        new_entries = (
-                            self.counter.entry_count - self._prev_entry_count
-                        )
-                        for _ in range(new_entries):
+                        entry_events = [
+                            ev for ev in crossing_events if ev["direction"] == "entry"
+                        ]
+                        for event in entry_events:
+                            # Identity binding: authorise using the 2FA session of the
+                            # specific track that crossed, so one person's swipe cannot
+                            # authorise somebody else walking through.
+                            crossing_track = event["track_id"]
+                            auth_info = self.auth_states.get(crossing_track) or {}
+                            authenticated_name = (
+                                auth_info.get("name")
+                                if auth_info.get("status") == "granted"
+                                else None
+                            )
+
                             # Returns dict: {"status":"authorized"|"tailgate", ...}
-                            result = self.controller.check_for_tailgate()
+                            result = self.controller.check_for_tailgate(
+                                authenticated_name=authenticated_name
+                            )
 
                             if result["status"] == "tailgate":
                                 # Trigger non-blocking audio alarm chime
@@ -467,14 +478,14 @@ class WebcamCapture:
                                 host = result.get("host_employee")
                                 if host:
                                     print(
-                                        f"🚨 TAILGATE DETECTED 🚨 | "
-                                        f"Probable host: {host['name']} "
+                                        f"🚨 TAILGATE DETECTED 🚨 | Track ID {crossing_track} "
+                                        f"unverified | Probable host: {host['name']} "
                                         f"({host['employee_id']})"
                                     )
                                 else:
                                     print(
-                                        "🚨 TAILGATE DETECTED 🚨 | "
-                                        "No prior swipe on record"
+                                        f"🚨 TAILGATE DETECTED 🚨 | Track ID {crossing_track} "
+                                        f"unverified | No prior swipe on record"
                                     )
 
                                 # Module 6+8: Capture and log the tailgate event
@@ -503,9 +514,6 @@ class WebcamCapture:
                                 )
                                 # Log authorized entry in SQLite database for reporting
                                 self.db.log_event(f"Authorized Entry: {emp.get('name', 'Unknown')}", "")
-
-                    # Keep entry count in sync.
-                    self._prev_entry_count = self.counter.entry_count
 
                     # Draw tripwire line + IN/OUT overlay (skipped if headless)
                     if not HEADLESS_MODE:
