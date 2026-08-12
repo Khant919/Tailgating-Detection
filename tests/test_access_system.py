@@ -72,6 +72,25 @@ class AccessControllerTests(unittest.TestCase):
         self.assertEqual(response_bad.status_code, 401)
         self.assertEqual(response_bad.get_json()['status'], 'error')
 
+    def test_pending_face_match_generates_jwt_and_html(self):
+        import jwt
+        from config import JWT_SECRET
+        
+        controller = AccessController(port=5004, swipe_timeout=5)
+        client = controller._app.test_client()
+
+        # Set pending face match
+        controller.set_pending_face_match("Khant")
+
+        # Request admin portal
+        response = client.get('/admin')
+        self.assertEqual(response.status_code, 200)
+        
+        html_content = response.get_data(as_text=True)
+        # Check that the matched name and generated ID are populated in HTML
+        self.assertIn("Khant", html_content)
+        self.assertIn("EMP-KHANT", html_content)
+
 
 if __name__ == '__main__':
     unittest.main()
