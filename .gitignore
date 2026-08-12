@@ -15,11 +15,23 @@ ENV/
 *.db
 test_*.db
 
-# Screenshots & evidence logs
+# Biometric & evidence data — never commit images of real people.
+# Breach screenshots and employee reference photos are personal data; committing
+# them to a public repository is exactly the disclosure this system exists to
+# prevent. Keep them local only.
 screenshots/
+known_faces/
 *.png
 *.jpg
 *.jpeg
+*.webp
+*.bmp
+*.tiff
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
 
 # IDE & OS specific files
 .vscode/
