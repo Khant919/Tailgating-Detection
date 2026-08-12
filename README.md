@@ -92,7 +92,27 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
-*(Note: Windows Python 3.13 users can use `pip install dlib-bin` for precompiled binaries).*
+
+**Python version:** use **CPython 3.10 – 3.13**. The `face_recognition` stage needs `dlib`, and
+precompiled `dlib-bin` wheels are only published up to 3.13 — on 3.14 there is no wheel and the
+source build requires CMake + Visual Studio Build Tools.
+
+On Windows, install the precompiled dlib wheel *before* the rest, then install
+`face_recognition` without its dependencies (its metadata pins the `dlib` sdist,
+which would otherwise shadow `dlib-bin` and trigger a source build):
+
+```bash
+pip install dlib-bin
+pip install --no-deps face_recognition face_recognition_models
+pip install -r requirements.txt
+```
+
+If `face_recognition` or `pyzbar` are unavailable, the app still runs: YOLO detection,
+tracking, tripwire counting, tailgate alerting, evidence capture and the dashboard all work,
+and only the face-matching / camera-QR stages of 2FA are skipped.
+
+`pyzbar` additionally needs the [Visual C++ 2013 Redistributable](https://www.microsoft.com/en-US/download/details.aspx?id=40784)
+on Windows, otherwise `libzbar-64.dll` fails to load.
 
 ### 3. Add Employee Photos for Face Enrollment
 Place employee reference photos inside the `known_faces/` folder:

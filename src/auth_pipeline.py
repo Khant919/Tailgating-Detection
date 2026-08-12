@@ -26,14 +26,20 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 # Third-party computer vision libraries
+# These optional dependencies fail in more ways than ImportError: face_recognition
+# needs a compiled dlib, and pyzbar loads libzbar-64.dll at import time (raising
+# OSError/FileNotFoundError when the VC++ runtime is absent). Catch broadly so a
+# missing optional dependency degrades the 2FA stage instead of killing the app.
 try:
     import face_recognition
-except ImportError:
+except Exception as exc:
+    print(f"[2FA] face_recognition unavailable ({exc.__class__.__name__}) — face matching disabled.")
     face_recognition = None
 
 try:
     from pyzbar import pyzbar
-except ImportError:
+except Exception as exc:
+    print(f"[2FA] pyzbar unavailable ({exc.__class__.__name__}) — camera QR scanning disabled.")
     pyzbar = None
 
 
