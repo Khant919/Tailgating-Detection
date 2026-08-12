@@ -1,10 +1,24 @@
-opencv-python>=4.7.0
+# Core computer vision & detection
+# Pinned below 5.0: OpenCV 5 removed the top-level Haar cascade API
+# (cv2.CascadeClassifier) that the GDPR face-blurring stage relies on.
+opencv-python>=4.7.0,<5
+numpy>=1.24.0
 ultralytics>=8.0.0
+
+# Web layer: access API (port 5005) + evidence dashboard (port 5001)
 flask>=3.0.0
+Flask-Limiter>=3.5.0
 requests>=2.31.0
-ultralytics>=8.0.0
-opencv-python
-flask
-requests
+
+# 2FA: expiring JWT badge tokens + dynamic QR codes
 PyJWT>=2.8.0
 qrcode[pil]>=7.4.2
+
+# 2FA: face recognition & QR decoding
+# NOTE: face_recognition requires dlib. On Windows install the precompiled
+# wheel first:  pip install dlib-bin
+# dlib-bin publishes wheels for CPython <= 3.13 only. On newer interpreters
+# face_recognition will be absent and auth_pipeline.py degrades gracefully:
+# tripwire tailgate detection still runs, face-matching 2FA is skipped.
+face_recognition>=1.3.0
+pyzbar>=0.1.9

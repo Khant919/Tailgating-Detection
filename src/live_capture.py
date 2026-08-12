@@ -124,9 +124,12 @@ class WebcamCapture:
         self.db = DatabaseManager()
 
         self.dashboard_thread = None
-        
+
         # Module 9: Perspective transform matrix
         self.M = None
+
+        # Module 8: Haar Cascade for GDPR face blurring — loaded lazily on first breach.
+        self._face_cascade = None
 
     def _get_homography_matrix(self, w: int, h: int) -> np.ndarray:
         """
@@ -171,6 +174,56 @@ class WebcamCapture:
             except Exception as e:
                 print(f"[WebcamCapture] [Download] Error: Failed to download Haar Cascade: {e}")
         return local_path.replace("\\", "/")
+
+    def _get_face_cascade(self) -> cv2.CascadeClassifier | None:
+        """
+        Lazily loads the Haar Cascade face classifier used for GDPR blurring.
+        Returns None if the cascade could not be loaded, so blurring degrades
+        gracefully into a skipped screenshot rather than crashing the loop.
+        """
+        if self._face_cascade is None:
+            cascade_path = self._ensure_cascade_file()
+            cascade = cv2.CascadeClassifier(cascade_path)
+            if cascade.empty():
+                print(f"[WebcamCapture] Error: Could not load Haar Cascade from {cascade_path}.")
+                return None
+            self._face_cascade = cascade
+        return self._face_cascade
+
+    def _blur_faces(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Module 8: GDPR compliance — applies a 51x51 Gaussian blur over every
+        detected face before the frame is written to disk as breach evidence.
+
+        Operates on a copy so the live display frame keeps unblurred faces for
+        the on-screen guard view.
+
+        Args:
+            frame: BGR frame to anonymise.
+
+        Returns:
+            A new frame with all detected face regions blurred.
+        """
+        cascade = self._get_face_cascade()
+        if cascade is None:
+            # Fail closed: without a working cascade we cannot guarantee
+            # anonymisation, so return a fully blurred frame rather than
+            # writing identifiable faces to disk.
+            print("[WebcamCapture] Warning: Cascade unavailable — blurring entire frame.")
+            return cv2.GaussianBlur(frame, (51, 51), 0)
+
+        anonymised = frame.copy()
+        gray = cv2.cvtColor(anonymised, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+        for (x, y, w, h) in faces:
+            roi = anonymised[y:y + h, x:x + w]
+            if roi.size == 0:
+                continue
+            anonymised[y:y + h, x:x + w] = cv2.GaussianBlur(roi, (51, 51), 0)
+
+        print(f"[WebcamCapture] GDPR: Blurred {len(faces)} face(s) in evidence screenshot.")
+        return anonymised
 
     def _draw_radar_map(self, frame: np.ndarray, detections) -> None:
         """Plots tracked people onto a bird's-eye 2D view displayed as a radar map."""
@@ -429,7 +482,10 @@ class WebcamCapture:
                                 timestamp_filename = f"{int(time.time())}.jpg"
                                 saved_image_path = os.path.join(self.screenshot_dir, timestamp_filename)
 
-                                if cv2.imwrite(saved_image_path, frame):
+                                # Module 8: Anonymise faces before persisting evidence
+                                evidence_frame = self._blur_faces(frame)
+
+                                if cv2.imwrite(saved_image_path, evidence_frame):
                                     print(f"[WebcamCapture] Saved evidence screenshot: {saved_image_path}")
                                 else:
                                     print(f"[WebcamCapture] Error saving screenshot to: {saved_image_path}")
