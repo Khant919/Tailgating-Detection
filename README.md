@@ -141,9 +141,27 @@ On Windows, install the precompiled dlib wheel *before* the rest, then install
 which would otherwise shadow `dlib-bin` and trigger a source build):
 
 ```bash
-pip install dlib-bin
-pip install --no-deps face_recognition face_recognition_models
-pip install -r requirements.txt
+py -3.12 -m venv venv312
+venv312\Scripts\pip install dlib-bin
+venv312\Scripts\pip install --no-deps face_recognition face_recognition_models
+venv312\Scripts\pip install Pillow "setuptools<81"
+venv312\Scripts\pip install -r requirements.txt
+```
+
+Two gotchas found in practice, both silent failures rather than install errors:
+
+- `--no-deps` also skips **Pillow**, which `face_recognition` imports directly — install it
+  separately or `face_recognition` raises `ModuleNotFoundError: No module named 'PIL'` on first use.
+- `face_recognition_models` looks up its model files via `pkg_resources`, which **setuptools ≥ 81
+  removed**. A fresh venv's default setuptools is new enough to break this with
+  `ModuleNotFoundError: No module named 'pkg_resources'` even though `face_recognition_models`
+  itself installed successfully. Pin `setuptools<81`.
+
+Verify enrollment actually works before relying on it — it fails silently into "0 employees
+enrolled" if `known_faces/` is empty or a photo has no detectable face:
+
+```bash
+venv312\Scripts\python -c "from src.auth_pipeline import TwoFactorAuthenticator; a = TwoFactorAuthenticator(); print(list(a.known_employees))"
 ```
 
 If `face_recognition` or `pyzbar` are unavailable, the app still runs: YOLO detection,
