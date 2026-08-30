@@ -269,28 +269,30 @@ class TripwireCounter:
 
             prev_entry = self.track_history[track_id]
             # REFERENCE POINTS FOR CROSSING:
-            # Evaluates Head (y1) and Body Center (cy) with a hysteresis deadband buffer
-            # to eliminate false auto-increments caused by bounding-box jitter while sitting still.
+            # Evaluates upper torso / head level (y1 + 0.25 * height) and body centroid (cy)
+            # This ensures both full-body walking and sitting webcam head down/up trigger reliably.
             prev_cx, prev_cy, prev_y1, prev_y2 = prev_entry if len(prev_entry) == 4 else (prev_entry[0], prev_entry[1], prev_entry[1], prev_entry[1])
-            curr_head = y1
+            
+            curr_upper = y1 + int(0.25 * (y2 - y1))
+            prev_upper = prev_y1 + int(0.25 * (prev_y2 - prev_y1))
+            
             curr_center = curr_cy
-            prev_head = prev_y1
             prev_center = prev_cy
 
-            deadband = 12
+            deadband = 10
             upper_limit = self.tripwire_y - deadband
             lower_limit = self.tripwire_y + deadband
 
             # Downward Crossing (ENTRY / IN):
-            # 1. Intentional head ducking/bobbing across the line
-            head_down = (prev_head < self.tripwire_y and curr_head >= self.tripwire_y)
+            # 1. Head/upper body lowers past tripwire line
+            head_down = (prev_upper < self.tripwire_y and curr_upper >= self.tripwire_y)
             # 2. Body traversal crossing completely from upper zone to lower zone past deadband
             center_down = (prev_center < upper_limit and curr_center >= lower_limit)
             is_entry = head_down or center_down
 
             # Upward Crossing (EXIT / OUT):
-            # 1. Intentional head rising across the line
-            head_up = (prev_head > self.tripwire_y and curr_head <= self.tripwire_y)
+            # 1. Head/upper body rises above tripwire line
+            head_up = (prev_upper > self.tripwire_y and curr_upper <= self.tripwire_y)
             # 2. Body traversal crossing completely from lower zone to upper zone past deadband
             center_up = (prev_center > lower_limit and curr_center <= upper_limit)
             is_exit = head_up or center_up
@@ -310,7 +312,7 @@ class TripwireCounter:
                 })
                 print(
                     f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
-                    f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
+                    f"crossing (center: {prev_center} → {curr_center}, upper: {prev_upper} → {curr_upper}) | "
                     f"IN={self.entry_count}  OUT={self.exit_count}"
                 )
 
@@ -338,7 +340,7 @@ class TripwireCounter:
                 })
                 print(
                     f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
-                    f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
+                    f"crossing (center: {prev_center} → {curr_center}, upper: {prev_upper} → {curr_upper}) | "
                     f"IN={self.entry_count}  OUT={self.exit_count}"
                 )
 
