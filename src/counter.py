@@ -296,61 +296,51 @@ class TripwireCounter:
             is_exit = head_up or center_up
 
             # ENTRY: crossed downward
-            if is_entry:
-                if self.crossed_ids.get(track_id) != "entry":
-                    occupancy = self._settled_occupancy(track_id)
+            if is_entry and self.crossed_ids.get(track_id) != "entry":
+                occupancy = self._settled_occupancy(track_id)
 
-                    self.entry_count += occupancy
-                    self.crossed_ids[track_id] = "entry"
-                    self._trigger_flash("entry")
+                self.entry_count += occupancy
+                self.crossed_ids[track_id] = "entry"
+                self._trigger_flash("entry")
 
+                events.append({
+                    "track_id": track_id,
+                    "direction": "entry",
+                    "occluded": False,
+                })
+                print(
+                    f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
+                    f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
+                    f"IN={self.entry_count}  OUT={self.exit_count}"
+                )
+
+                for _ in range(occupancy - 1):
+                    self.occluded_entries += 1
                     events.append({
                         "track_id": track_id,
                         "direction": "entry",
-                        "occluded": False,
+                        "occluded": True,
                     })
                     print(
-                        f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
-                        f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
-                        f"IN={self.entry_count}  OUT={self.exit_count}"
+                        f"[TripwireCounter] 🚨 OCCLUDED ENTRY | hidden person inside "
+                        f"box of ID {track_id} | IN={self.entry_count}"
                     )
-
-                    for _ in range(occupancy - 1):
-                        self.occluded_entries += 1
-                        events.append({
-                            "track_id": track_id,
-                            "direction": "entry",
-                            "occluded": True,
-                        })
-                        print(
-                            f"[TripwireCounter] 🚨 OCCLUDED ENTRY | hidden person inside "
-                            f"box of ID {track_id} | IN={self.entry_count}"
-                        )
 
             # EXIT: crossed upward
-            elif is_exit:
-                if self.crossed_ids.get(track_id) != "exit":
-                    self.exit_count += 1
-                    self.crossed_ids[track_id] = "exit"
-                    self._trigger_flash("exit")
-                    events.append({
-                        "track_id": track_id,
-                        "direction": "exit",
-                        "occluded": False,
-                    })
-                    print(
-                        f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
-                        f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
-                        f"IN={self.entry_count}  OUT={self.exit_count}"
-                    )
-
-            else:
-                last = self.crossed_ids.get(track_id)
-                # Reset crossed state when person clearly returns to the starting side beyond deadband
-                if last == "entry" and (curr_center < upper_limit or curr_head < self.tripwire_y):
-                    del self.crossed_ids[track_id]
-                elif last == "exit" and (curr_center > lower_limit or curr_head > self.tripwire_y):
-                    del self.crossed_ids[track_id]
+            elif is_exit and self.crossed_ids.get(track_id) != "exit":
+                self.exit_count += 1
+                self.crossed_ids[track_id] = "exit"
+                self._trigger_flash("exit")
+                events.append({
+                    "track_id": track_id,
+                    "direction": "exit",
+                    "occluded": False,
+                })
+                print(
+                    f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
+                    f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
+                    f"IN={self.entry_count}  OUT={self.exit_count}"
+                )
 
             self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
 
