@@ -415,6 +415,14 @@ class WebcamCapture:
                                         info["granted_time"] = time.time()
                                         break
 
+                            # Bring OpenCV camera window to foreground
+                            if not HEADLESS_MODE:
+                                try:
+                                    cv2.setWindowProperty(self.window_title, cv2.WND_PROP_TOPMOST, 1)
+                                    cv2.setWindowProperty(self.window_title, cv2.WND_PROP_TOPMOST, 0)
+                                except Exception:
+                                    pass
+
                     # 3. Draw 2FA bounding box overlays (Yellow for Face Match, Green for QR Grant)
                     if not HEADLESS_MODE:
                         now = time.time()

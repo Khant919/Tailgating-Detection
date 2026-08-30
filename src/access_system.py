@@ -435,21 +435,15 @@ class AccessController:
                         isClosing = true;
                         clearInterval(pollTimer);
                         
-                        // 1. Instantly vanish page content
-                        document.body.innerHTML = `
-                            <div style="background-color: #000000; color: #00ff66; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Segoe UI', Tahoma, sans-serif; text-align: center; padding: 20px;">
-                                <div style="font-size: 48px; margin-bottom: 12px;">📱 ➔ 💳</div>
-                                <h2 style="color: #00ff66; margin: 0 0 8px 0; font-size: 22px;">QR Code Scanned!</h2>
-                                <p style="color: #8b949e; margin: 0 0 12px 0; font-size: 14px;">Mobile Keycard transferred to phone. Closing window...</p>
-                            </div>
-                        `;
+                        // 1. Instantly blank out and vanish page
+                        document.body.innerHTML = '';
+                        document.body.style.backgroundColor = '#000000';
+                        document.title = 'Access Granted';
 
                         // 2. Self-close the browser tab immediately
-                        setTimeout(() => {
-                            try { window.open('', '_self', '').close(); } catch(e) {}
-                            try { window.close(); } catch(e) {}
-                            try { window.location.replace("about:blank"); } catch(e) {}
-                        }, 300);
+                        try { window.open('', '_self', ''); window.close(); } catch(e) {}
+                        try { window.close(); } catch(e) {}
+                        try { window.location.replace("about:blank"); } catch(e) {}
                     }
                 }
             } catch (e) {}
