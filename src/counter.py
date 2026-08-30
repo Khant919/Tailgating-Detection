@@ -269,21 +269,30 @@ class TripwireCounter:
 
             prev_entry = self.track_history[track_id]
             # REFERENCE POINTS FOR CROSSING:
-            # Evaluates Head (y1) and Body Center (cy) to ensure reliable IN/OUT counting
+            # Evaluates Head (y1) and Body Center (cy) with a hysteresis deadband buffer
+            # to eliminate false auto-increments caused by bounding-box jitter while sitting still.
             prev_cx, prev_cy, prev_y1, prev_y2 = prev_entry if len(prev_entry) == 4 else (prev_entry[0], prev_entry[1], prev_entry[1], prev_entry[1])
             curr_head = y1
             curr_center = curr_cy
             prev_head = prev_y1
             prev_center = prev_cy
 
+            deadband = 12
+            upper_limit = self.tripwire_y - deadband
+            lower_limit = self.tripwire_y + deadband
+
             # Downward Crossing (ENTRY / IN):
+            # 1. Intentional head ducking/bobbing across the line
             head_down = (prev_head < self.tripwire_y and curr_head >= self.tripwire_y)
-            center_down = (prev_center < self.tripwire_y and curr_center >= self.tripwire_y)
+            # 2. Body traversal crossing completely from upper zone to lower zone past deadband
+            center_down = (prev_center < upper_limit and curr_center >= lower_limit)
             is_entry = head_down or center_down
 
             # Upward Crossing (EXIT / OUT):
+            # 1. Intentional head rising across the line
             head_up = (prev_head > self.tripwire_y and curr_head <= self.tripwire_y)
-            center_up = (prev_center > self.tripwire_y and curr_center <= self.tripwire_y)
+            # 2. Body traversal crossing completely from lower zone to upper zone past deadband
+            center_up = (prev_center > lower_limit and curr_center <= upper_limit)
             is_exit = head_up or center_up
 
             # ENTRY: crossed downward
@@ -302,7 +311,7 @@ class TripwireCounter:
                     })
                     print(
                         f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
-                        f"center_y {prev_center} → {curr_center} (head {prev_head} → {curr_head}) | "
+                        f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
                         f"IN={self.entry_count}  OUT={self.exit_count}"
                     )
 
@@ -331,16 +340,16 @@ class TripwireCounter:
                     })
                     print(
                         f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
-                        f"center_y {prev_center} → {curr_center} (head {prev_head} → {curr_head}) | "
+                        f"crossing (center: {prev_center} → {curr_center}, head: {prev_head} → {curr_head}) | "
                         f"IN={self.entry_count}  OUT={self.exit_count}"
                     )
 
             else:
                 last = self.crossed_ids.get(track_id)
-                # Reset crossed state when person moves completely back to the original side
-                if last == "entry" and (curr_center < self.tripwire_y or curr_head < self.tripwire_y):
+                # Reset crossed state when person clearly returns to the starting side beyond deadband
+                if last == "entry" and (curr_center < upper_limit or curr_head < self.tripwire_y):
                     del self.crossed_ids[track_id]
-                elif last == "exit" and (curr_center > self.tripwire_y or curr_head > self.tripwire_y):
+                elif last == "exit" and (curr_center > lower_limit or curr_head > self.tripwire_y):
                     del self.crossed_ids[track_id]
 
             self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
