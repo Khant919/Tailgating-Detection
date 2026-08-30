@@ -157,15 +157,19 @@ class TripwireCounter:
         merge_aspect = SINGLE_PERSON_ASPECT_RATIO * OCCLUSION_ASPECT_MULTIPLIER
 
         occupancy = 1
-        if aspect >= merge_aspect:
-            # How many single-person widths fit across this box. Rounded, not
-            # truncated: two people standing close make a box roughly 1.9 single
-            # widths across, and truncation would score that as one person.
-            occupancy = round(aspect / SINGLE_PERSON_ASPECT_RATIO)
+        # In upper-body/webcam framing (box extends to bottom of frame), a single person's
+        # head+shoulders naturally has aspect ratio ~0.8-1.2. Two people abreast will have aspect >= 1.6.
+        is_upper_body_crop = bool(self._frame_size and y2 >= int(self._frame_size[1] * 0.85))
+        if is_upper_body_crop:
+            if aspect >= 1.6:
+                occupancy = round(aspect / 0.9)
+        else:
+            if aspect >= merge_aspect:
+                # How many single-person widths fit across this box for full-body view
+                occupancy = round(aspect / SINGLE_PERSON_ASPECT_RATIO)
 
-        # Supporting evidence: an implausibly large box, or two motion clusters
-        # moving apart inside it. Either implies at least a second person.
-        if flow_split or (width * height) > self.max_person_area:
+        # Supporting evidence: optical flow split confirms two independent diverging bodies
+        if flow_split:
             occupancy = max(occupancy, 2)
 
         return max(1, min(occupancy, MAX_OCCUPANCY_PER_BOX))
@@ -260,18 +264,30 @@ class TripwireCounter:
             curr_cy: int = (y1 + y2) // 2   # True centre
 
             if track_id not in self.track_history:
-                self.track_history[track_id] = (curr_cx, curr_cy)
+                self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
                 continue
 
-            _, prev_cy = self.track_history[track_id]
+            prev_entry = self.track_history[track_id]
+            # REFERENCE POINTS FOR CROSSING:
+            # Evaluates Head (y1) and Body Center (cy) to ensure reliable IN/OUT counting
+            prev_cx, prev_cy, prev_y1, prev_y2 = prev_entry if len(prev_entry) == 4 else (prev_entry[0], prev_entry[1], prev_entry[1], prev_entry[1])
+            curr_head = y1
+            curr_center = curr_cy
+            prev_head = prev_y1
+            prev_center = prev_cy
 
-            prev_above = prev_cy  < self.tripwire_y
-            curr_below = curr_cy >= self.tripwire_y
-            prev_below = prev_cy  > self.tripwire_y
-            curr_above = curr_cy <= self.tripwire_y
+            # Downward Crossing (ENTRY / IN):
+            head_down = (prev_head < self.tripwire_y and curr_head >= self.tripwire_y)
+            center_down = (prev_center < self.tripwire_y and curr_center >= self.tripwire_y)
+            is_entry = head_down or center_down
 
-            # ENTRY: centre crossed downward
-            if prev_above and curr_below:
+            # Upward Crossing (EXIT / OUT):
+            head_up = (prev_head > self.tripwire_y and curr_head <= self.tripwire_y)
+            center_up = (prev_center > self.tripwire_y and curr_center <= self.tripwire_y)
+            is_exit = head_up or center_up
+
+            # ENTRY: crossed downward
+            if is_entry:
                 if self.crossed_ids.get(track_id) != "entry":
                     occupancy = self._settled_occupancy(track_id)
 
@@ -279,8 +295,6 @@ class TripwireCounter:
                     self.crossed_ids[track_id] = "entry"
                     self._trigger_flash("entry")
 
-                    # The tracked person owns the first event and can be matched
-                    # against their own authentication.
                     events.append({
                         "track_id": track_id,
                         "direction": "entry",
@@ -288,14 +302,10 @@ class TripwireCounter:
                     })
                     print(
                         f"[TripwireCounter] ENTRY  | ID {track_id:>3} | "
-                        f"center_y {prev_cy} → {curr_cy} | "
+                        f"center_y {prev_center} → {curr_center} (head {prev_head} → {curr_head}) | "
                         f"IN={self.entry_count}  OUT={self.exit_count}"
                     )
 
-                    # Anyone else hidden inside the same box has no track of
-                    # their own, so no identity and no possible authentication.
-                    # They are emitted as separate occluded entries, which the
-                    # access controller can only ever resolve as a tailgate.
                     for _ in range(occupancy - 1):
                         self.occluded_entries += 1
                         events.append({
@@ -308,8 +318,8 @@ class TripwireCounter:
                             f"box of ID {track_id} | IN={self.entry_count}"
                         )
 
-            # EXIT: centre crossed upward
-            elif prev_below and curr_above:
+            # EXIT: crossed upward
+            elif is_exit:
                 if self.crossed_ids.get(track_id) != "exit":
                     self.exit_count += 1
                     self.crossed_ids[track_id] = "exit"
@@ -321,18 +331,19 @@ class TripwireCounter:
                     })
                     print(
                         f"[TripwireCounter] EXIT   | ID {track_id:>3} | "
-                        f"center_y {prev_cy} → {curr_cy} | "
+                        f"center_y {prev_center} → {curr_center} (head {prev_head} → {curr_head}) | "
                         f"IN={self.entry_count}  OUT={self.exit_count}"
                     )
 
             else:
                 last = self.crossed_ids.get(track_id)
-                if last == "entry" and prev_above:
+                # Reset crossed state when person moves completely back to the original side
+                if last == "entry" and (curr_center < self.tripwire_y or curr_head < self.tripwire_y):
                     del self.crossed_ids[track_id]
-                elif last == "exit" and prev_below:
+                elif last == "exit" and (curr_center > self.tripwire_y or curr_head > self.tripwire_y):
                     del self.crossed_ids[track_id]
 
-            self.track_history[track_id] = (curr_cx, curr_cy)
+            self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
 
         return events
 

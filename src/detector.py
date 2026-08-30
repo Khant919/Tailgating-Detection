@@ -119,6 +119,68 @@ class PersonDetector:
             
         return dot_product / (magnitude1 * magnitude2)
 
+    def _filter_detections(self, detections: list[Detection], frame_shape: tuple) -> list[Detection]:
+        """
+        Filters out degenerate boxes and suppresses overlapping container/phantom boxes.
+        """
+        if not detections:
+            return []
+
+        frame_h, frame_w = frame_shape[:2]
+        valid: list[Detection] = []
+
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            w = x2 - x1
+            h = y2 - y1
+            if w < 25 or h < 35:
+                continue
+            if w > 0.95 * frame_w and h > 0.95 * frame_h:
+                continue
+            valid.append(det)
+
+        if len(valid) <= 1:
+            return valid
+
+        # Suppress heavily overlapping / container boxes (e.g. background clothing enclosing a person)
+        keep = [True] * len(valid)
+        for i in range(len(valid)):
+            if not keep[i]:
+                continue
+            x1_i, y1_i, x2_i, y2_i = valid[i].bbox
+            area_i = (x2_i - x1_i) * (y2_i - y1_i)
+
+            for j in range(i + 1, len(valid)):
+                if not keep[j]:
+                    continue
+                x1_j, y1_j, x2_j, y2_j = valid[j].bbox
+                area_j = (x2_j - x1_j) * (y2_j - y1_j)
+
+                inter_x1 = max(x1_i, x1_j)
+                inter_y1 = max(y1_i, y1_j)
+                inter_x2 = min(x2_i, x2_j)
+                inter_y2 = min(y2_i, y2_j)
+
+                inter_w = max(0, inter_x2 - inter_x1)
+                inter_h = max(0, inter_y2 - inter_y1)
+                inter_area = inter_w * inter_h
+
+                min_area = min(area_i, area_j)
+                if min_area > 0 and (inter_area / min_area) > 0.65:
+                    # One box heavily encloses or overlaps the other -> keep the cleaner/higher-confidence box
+                    if area_i > area_j * 1.2:
+                        keep[i] = False
+                        break
+                    elif area_j > area_i * 1.2:
+                        keep[j] = False
+                    elif valid[i].confidence < valid[j].confidence:
+                        keep[i] = False
+                        break
+                    else:
+                        keep[j] = False
+
+        return [valid[k] for k in range(len(valid)) if keep[k]]
+
     def detect(self, frame) -> list[Detection]:
         """
         Run YOLOv8 + ByteTrack on one frame. Return tracked person detections with Re-ID mappings.
@@ -165,6 +227,9 @@ class PersonDetector:
                         confidence=confidence,
                     )
                 )
+
+            # Filter out degenerate boxes and suppress overlapping background phantom boxes
+            raw_detections = self._filter_detections(raw_detections, frame.shape)
 
             # 2. Run Visual Re-ID Fallback Engine
             current_ids = {det.track_id for det in raw_detections if det.track_id >= 0}

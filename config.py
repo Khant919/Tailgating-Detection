@@ -8,6 +8,12 @@ variables; see the Module 5 section below.
 
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Module 1: Webcam Capture & Display
 # ---------------------------------------------------------------------------
@@ -50,7 +56,7 @@ ROI_POINTS = [
 YOLO_MODEL = "yolov8n.pt"
 
 # Minimum detection confidence score (0.0 – 1.0)
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = float(os.environ.get("TAILGATE_CONFIDENCE_THRESHOLD", "0.65"))
 
 # COCO dataset class ID for 'person'
 PERSON_CLASS_ID = 0
@@ -94,15 +100,10 @@ TRACK_LABEL_THICKNESS    = 2
 # ---------------------------------------------------------------------------
 
 # Coordinates for the horizontal virtual line (x, y).
-# These are the 640x480 fallbacks used only until the first frame arrives; the
-# counter rescales itself to the real frame size using the ratios below, so the
-# line lands in the same relative place on a 720p or 1080p camera.
-TRIPWIRE_START = (50, 300)
-TRIPWIRE_END   = (600, 300)
-
-# Tripwire position as a fraction of frame height/width (derived from the
-# 640x480 pixel values above: 300/480, 50/640, 600/640).
-TRIPWIRE_Y_RATIO       = 0.625
+# Positioned at frame center (y = 50% height) for responsive head and body crossing.
+TRIPWIRE_Y_RATIO       = float(os.environ.get("TAILGATE_TRIPWIRE_Y_RATIO", "0.50"))
+TRIPWIRE_START         = (50, int(480 * TRIPWIRE_Y_RATIO))
+TRIPWIRE_END           = (600, int(480 * TRIPWIRE_Y_RATIO))
 TRIPWIRE_X_START_RATIO = 0.078
 TRIPWIRE_X_END_RATIO   = 0.9375
 
@@ -212,7 +213,7 @@ PROCESS_EVERY_N_FRAMES = 2
 # box). Expressed as a ratio because a fixed pixel value is meaningless across
 # resolutions — the previous absolute 350000 px exceeded an entire 640x480 frame
 # (307200 px), so the check could never fire.
-MAX_SINGLE_PERSON_AREA_RATIO = 0.45
+MAX_SINGLE_PERSON_AREA_RATIO = float(os.environ.get("TAILGATE_MAX_PERSON_AREA_RATIO", "0.45"))
 
 # Absolute fallback used only until the first frame is seen.
 MAX_SINGLE_PERSON_AREA = int(640 * 480 * MAX_SINGLE_PERSON_AREA_RATIO)

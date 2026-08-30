@@ -23,12 +23,14 @@ import threading
 import time
 from collections import deque
 from functools import wraps
-from typing import Optional
+from typing import Optional, Any
 import socket
 import jwt
 import qrcode
 import io
 import base64
+
+from src.database import DatabaseManager
 
 import requests
 from flask import Flask, jsonify, request
@@ -63,20 +65,19 @@ def _get_local_ip(request_host: Optional[str] = None) -> str:
                 return host_ip
 
     # 2. Otherwise, query all active network adapter IPs and choose the physical LAN adapter
+        if host_ip.startswith("192.168.") or host_ip.startswith("10.") or host_ip.startswith("172."):
+            return host_ip
+
+    # 2. Inspect active network interfaces using socket
     try:
         hostname = socket.gethostname()
         ips = socket.gethostbyname_ex(hostname)[2]
         
-        # Prioritize 192.168.100.x subnet (user's active LAN subnet)
-        for ip in ips:
-            if ip.startswith("192.168.100."):
-                return ip
-                
-        # Fallback to other 192.168.x.x subnets
+        # Prefer standard home / office 192.168.x.x subnet
         for ip in ips:
             if ip.startswith("192.168."):
                 return ip
-                
+        
         # Fallback to other private classes (excluding common hypervisor switches)
         for ip in ips:
             if ip.startswith("172.") or ip.startswith("10."):
@@ -123,14 +124,17 @@ class AccessController:
         port:          int   = FLASK_PORT,
         swipe_timeout: float = SWIPE_TIMEOUT_SECONDS,
         webhook_url:   str   = WEBHOOK_URL,
+        db:            Optional[DatabaseManager] = None,
     ):
         self.port:          int           = port
         self.swipe_timeout: float         = swipe_timeout
         self.webhook_url:   Optional[str] = webhook_url or None
+        self.db:            DatabaseManager = db or DatabaseManager()
 
         self._valid_swipes: deque[SwipeRecord] = deque()
         self.last_valid_swipe: Optional[SwipeRecord] = None
         self._pending_face_match: Optional[str] = None
+        self._scanned_sessions: set[str] = set()
         self._lock: threading.Lock = threading.Lock()
 
         self._app: Flask = Flask(__name__)
@@ -153,6 +157,18 @@ class AccessController:
 
     def _register_routes(self) -> None:
         """Register Flask URL routes."""
+
+        @self._app.route("/api/check-qr-scanned", methods=["GET"])
+        def check_qr_scanned():
+            token = request.args.get("token", "")
+            name = request.args.get("name", "")
+            with self._lock:
+                is_scanned = (
+                    (token and token in self._scanned_sessions) or
+                    (name and name in self._scanned_sessions) or
+                    (name and name.strip().lower() in self._scanned_sessions)
+                )
+            return jsonify({"scanned": bool(is_scanned)}), 200
 
         @self._app.route("/swipe", methods=["POST"])
         @self.limiter.limit(RATE_LIMIT_SWIPE)
@@ -193,6 +209,9 @@ class AccessController:
 
             with self._lock:
                 self._valid_swipes.append(record)
+                if record.get("name"):
+                    self._scanned_sessions.add(record["name"])
+                    self._scanned_sessions.add(record["name"].strip().lower())
 
             print(
                 f"[AccessController] 💳 Swipe | {record['name']} "
@@ -229,19 +248,19 @@ class AccessController:
             with self._lock:
                 name = self._pending_face_match or "Alice Smith"
             
-            if name == "Alice Smith":
-                employee_id = "EMP001"
-            else:
-                clean_name = "".join(c for c in name if c.isalnum()).upper()
-                employee_id = f"EMP-{clean_name}"
+            # Fetch or create employee with persistent unique key from SQLite database
+            emp = self.db.get_or_create_employee(name)
+            employee_id = emp.get("employee_id", f"EMP-{name}")
+            unique_key = emp.get("unique_key", "")
             
-            # Generate JWT signed with JWT_SECRET containing employee's badge details.
+            # Generate JWT signed with JWT_SECRET containing employee's badge details and unique key.
             # The exp claim is what makes the QR safe to display on screen: a token
             # photographed off the monitor stops working after BADGE_TOKEN_TTL_SECONDS.
             issued_at = int(time.time())
             payload = {
                 "employee_id": employee_id,
                 "name":        name,
+                "unique_key":  unique_key,
                 "iat":         issued_at,
                 "exp":         issued_at + BADGE_TOKEN_TTL_SECONDS,
             }
@@ -302,14 +321,41 @@ class AccessController:
             color: #aaaaaa;
             font-size: 14px;
             line-height: 1.5;
-            margin-bottom: 25px;
+            margin-bottom: 20px;
+        }
+        .info-box {
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            text-align: left;
+            font-size: 13px;
+        }
+        .info-row {
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .info-label {
+            color: #8b949e;
+        }
+        .info-val {
+            color: #ffffff;
+            font-weight: 600;
+        }
+        .key-val {
+            color: #38bdf8;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            word-break: break-all;
         }
         .qr-container {
             background-color: white;
             padding: 15px;
             border-radius: 8px;
             display: inline-block;
-            margin-bottom: 25px;
+            margin-bottom: 20px;
         }
         .qr-image {
             display: block;
@@ -342,8 +388,26 @@ class AccessController:
 <body>
     <div class="card">
         <h1>SecureAccess Admin Onboarding</h1>
-        <p>Scan this QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge credentials: <strong>{{ name }} ({{ employee_id }})</strong>.</p>
+        <p>Scan this dynamic QR code with your smartphone connected to local Wi-Fi to register the mobile keycard badge:</p>
         
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Employee:</span>
+                <span class="info-val">{{ name }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Employee ID:</span>
+                <span class="info-val" style="color: #58a6ff;">{{ employee_id }}</span>
+            </div>
+            <div class="info-row" style="flex-direction: column; gap: 2px;">
+                <span class="info-label">Unique Security Key:</span>
+                <span class="key-val">{{ unique_key }}</span>
+            </div>
+            <div style="color: #238636; font-size: 11px; margin-top: 6px; border-top: 1px solid #21262d; padding-top: 6px;">
+                ✔ Active Employee Record Verified in SQLite DB
+            </div>
+        </div>
+
         <div class="qr-container">
             <img class="qr-image" src="{{ qr_data_uri }}" alt="Onboarding QR Code">
         </div>
@@ -353,6 +417,40 @@ class AccessController:
             <a href="{{ onboarding_url }}" style="color: #00ff66; text-decoration: none;">{{ onboarding_url }}</a>
         </div>
     </div>
+
+    <script>
+        const token = "{{ token }}";
+        const empName = "{{ name }}";
+        let isClosing = false;
+
+        // Poll every 300ms to detect when smartphone scans QR code
+        const pollTimer = setInterval(async () => {
+            if (isClosing) return;
+            try {
+                const res = await fetch(`/api/check-qr-scanned?token=${encodeURIComponent(token)}&name=${encodeURIComponent(empName)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.scanned) {
+                        isClosing = true;
+                        clearInterval(pollTimer);
+                        document.body.innerHTML = `
+                            <div style="background-color: #0d1117; color: #3fb950; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Segoe UI', Tahoma, sans-serif; text-align: center; padding: 20px;">
+                                <div style="font-size: 56px; margin-bottom: 15px;">📱 ➔ 💳</div>
+                                <h2 style="color: #00ff66; margin: 0 0 10px 0;">QR Code Scanned!</h2>
+                                <p style="color: #8b949e; margin: 0 0 20px 0; max-width: 340px; font-size: 14px;">Mobile Keycard loaded on your smartphone. Returning to camera view...</p>
+                                <span style="font-size: 12px; color: #58a6ff;">Closing this tab...</span>
+                            </div>
+                        `;
+                        setTimeout(() => {
+                            window.open('', '_self', '');
+                            window.close();
+                            window.location.href = 'about:blank';
+                        }, 500);
+                    }
+                }
+            } catch (e) {}
+        }, 300);
+    </script>
 </body>
 </html>
             """
@@ -361,13 +459,31 @@ class AccessController:
                 qr_data_uri=qr_data_uri,
                 onboarding_url=onboarding_url,
                 name=name,
-                employee_id=employee_id
+                employee_id=employee_id,
+                unique_key=unique_key,
+                token=token
             )
 
         @self._app.route("/mobile-keycard", methods=["GET"])
         @self._app.route("/keycard", methods=["GET"])
         def mobile_keycard():
             from flask import render_template_string
+            
+            token = request.args.get("token")
+            if token:
+                with self._lock:
+                    self._scanned_sessions.add(token)
+                    try:
+                        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+                        emp_name = payload.get("name")
+                        emp_id = payload.get("employee_id")
+                        if emp_name:
+                            self._scanned_sessions.add(emp_name)
+                            self._scanned_sessions.add(emp_name.strip().lower())
+                        print(f"[AccessController] 📱 QR Code Scanned! Mobile keycard connected: {emp_name} ({emp_id})")
+                    except Exception:
+                        pass
+
             
             html_template = """
 <!DOCTYPE html>

@@ -1,3 +1,4 @@
+
 # Employee reference photos
 
 Place one clear, front-facing photo per employee in this directory. The filename

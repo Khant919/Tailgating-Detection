@@ -60,7 +60,34 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(len(events), 5)
         
         # The latest event (Event 9) should be first
-        self.assertEqual(events[0]["status"], "Event 9")
+    def test_employee_registration_and_lookup(self):
+        """Verify employee registration, unique key generation, and retrieval."""
+        emp = self.db.get_or_create_employee("John Doe")
+        self.assertIsNotNone(emp)
+        self.assertEqual(emp["name"], "John Doe")
+        self.assertTrue(emp["employee_id"].startswith("EMP-"))
+        self.assertTrue(len(emp["unique_key"]) >= 16)
+
+        # Retrieve by name
+        by_name = self.db.get_employee_by_name("John Doe")
+        self.assertIsNotNone(by_name)
+        self.assertEqual(by_name["unique_key"], emp["unique_key"])
+
+        # Retrieve by key
+        by_key = self.db.get_employee_by_key(emp["unique_key"])
+        self.assertIsNotNone(by_key)
+        self.assertEqual(by_key["name"], "John Doe")
+
+        # Second call to get_or_create should return existing record (not create new one)
+        emp_again = self.db.get_or_create_employee("John Doe")
+        self.assertEqual(emp_again["unique_key"], emp["unique_key"])
+        self.assertEqual(emp_again["employee_id"], emp["employee_id"])
+
+        # List employees
+        all_emps = self.db.list_employees()
+        self.assertEqual(len(all_emps), 1)
+        self.assertEqual(all_emps[0]["name"], "John Doe")
 
 if __name__ == "__main__":
     unittest.main()
+

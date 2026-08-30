@@ -42,6 +42,8 @@ except Exception as exc:
     print(f"[2FA] pyzbar unavailable ({exc.__class__.__name__}) — camera QR scanning disabled.")
     pyzbar = None
 
+from src.database import DatabaseManager
+
 
 class TwoFactorAuthenticator:
     """
@@ -54,6 +56,7 @@ class TwoFactorAuthenticator:
         known_faces_dir: str = "known_faces",
         expiration_seconds: float = 5.0,
         tolerance: float = 0.6,
+        db: Optional[DatabaseManager] = None,
     ):
         """
         Initializes the 2FA engine and enrolls known employee faces.
@@ -62,10 +65,12 @@ class TwoFactorAuthenticator:
             known_faces_dir: Directory containing employee reference photos (.jpg, .jpeg, .png).
             expiration_seconds: Time limit (in seconds) for completing QR scan after face match.
             tolerance: Distance threshold for face_recognition matching (lower = stricter).
+            db: Optional DatabaseManager instance.
         """
         self.known_faces_dir = known_faces_dir
         self.expiration_seconds = expiration_seconds
         self.tolerance = tolerance
+        self.db = db or DatabaseManager()
 
         # Dictionary storing enrolled employee embeddings: {"employee_name": np.ndarray}
         self.known_employees: Dict[str, np.ndarray] = {}
@@ -155,7 +160,10 @@ class TwoFactorAuthenticator:
                 if len(encodings) > 0:
                     self.known_employees[employee_name] = encodings[0]
                     enrolled_count += 1
-                    print(f"[2FA Engine]   [OK] Enrolled: '{employee_name}'")
+                    emp_rec = self.db.get_or_create_employee(employee_name)
+                    emp_id = emp_rec.get("employee_id", "UNKNOWN")
+                    emp_key = emp_rec.get("unique_key", "")
+                    print(f"[2FA Engine]   [OK] Enrolled: '{employee_name}' (ID: {emp_id}, Key: {emp_key[:8]}...)")
                 else:
                     print(f"[2FA Engine] [WARNING] No face detected in '{filename}'. Skipping.")
             except Exception as e:

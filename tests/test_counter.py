@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from config import TRIPWIRE_Y_RATIO
 from src.counter import TripwireCounter
 
 
@@ -73,20 +74,20 @@ class ResolutionScalingTests(unittest.TestCase):
         counter = TripwireCounter()
         counter.process_crossing([], _frame(1920, 1080))
 
-        self.assertEqual(counter.tripwire_y, int(1080 * 0.625))
+        self.assertEqual(counter.tripwire_y, int(1080 * TRIPWIRE_Y_RATIO))
         self.assertLess(counter.tripwire_end[0], 1920)
 
     def test_scales_to_720p(self):
         counter = TripwireCounter()
         counter.process_crossing([], _frame(1280, 720))
 
-        self.assertEqual(counter.tripwire_y, int(720 * 0.625))
+        self.assertEqual(counter.tripwire_y, int(720 * TRIPWIRE_Y_RATIO))
 
     def test_counts_correctly_at_1080p(self):
         """A person crossing the rescaled line is still counted."""
         counter = TripwireCounter()
         frame = _frame(1920, 1080)
-        line_y = int(1080 * 0.625)
+        line_y = int(1080 * TRIPWIRE_Y_RATIO)
 
         counter.process_crossing([_Det(1, line_y - 200, cx=960)], frame)
         counter.process_crossing([_Det(1, line_y + 200, cx=960)], frame)

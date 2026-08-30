@@ -100,6 +100,8 @@ class WebcamCapture:
         self.controller    = controller
         self.authenticator = authenticator or TwoFactorAuthenticator()
         self.auth_states   = {} # track_id -> {"status": str, "name": str, "timestamp": float}
+        self._portal_opened_for: Dict[str, bool] = {}       # emp_name -> bool
+        self._last_portal_open_time: Dict[str, float] = {}   # emp_name -> timestamp
 
 
         # Module 7: Performance variables
@@ -307,13 +309,12 @@ class WebcamCapture:
         self.previous_timestamp = time.time()
         
         if not HEADLESS_MODE:
-            print("Press 'q' to quit and 's' to save the current frame.")
+            cv2.namedWindow(self.window_title, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            print("Fullscreen mode active. Press 'q' to quit, 's' to save screenshot, 'f' to toggle fullscreen.")
         else:
             print("[WebcamCapture] Headless Mode Enabled. Visual displays disabled.")
             print("[WebcamCapture] Press Ctrl+C in terminal to exit gracefully.")
-
-        # State flag to prevent opening multiple browser tabs per face recognition event
-        admin_portal_opened = False
 
         try:
             while True:
@@ -350,6 +351,10 @@ class WebcamCapture:
                 if self.authenticator is not None and detections:
                     # 1. Pass frame and bounding box of tracked people to verify_face()
                     for det in detections:
+                        # Skip if already granted access for this track to prevent reopening tabs
+                        if self.auth_states.get(det.track_id, {}).get("status") == "granted":
+                            continue
+
                         is_matched, emp_name = self.authenticator.verify_face(frame, det.bbox)
                         if is_matched:
                             self.auth_states[det.track_id] = {
@@ -361,17 +366,20 @@ class WebcamCapture:
                             if self.controller is not None:
                                 self.controller.set_pending_face_match(emp_name)
 
-                            # Auto-open Admin Portal in web browser (EXACTLY ONCE per face match event)
-                            if not admin_portal_opened:
+                            # Auto-open Admin Portal in web browser (EXACTLY ONCE per face match with 30s cooldown per employee)
+                            now_time = time.time()
+                            last_open = self._last_portal_open_time.get(emp_name, 0)
+                            if (not self._portal_opened_for.get(emp_name)) and (now_time - last_open > 30.0):
                                 port = self.controller.port if self.controller else 5005
                                 admin_url = f"http://localhost:{port}/admin"
-                                print(f"[2FA Engine] 🌐 Face Matched ({emp_name})! Opening Admin Portal: {admin_url}")
+                                print(f"[2FA Engine] 🌐 Face Matched ({emp_name})! Opening Admin Portal (One Tab): {admin_url}")
                                 webbrowser.open(admin_url)
-                                admin_portal_opened = True
+                                self._portal_opened_for[emp_name] = True
+                                self._last_portal_open_time[emp_name] = now_time
 
-                    # Reset state flag when active 2FA sessions clear (timeout or QR verified)
+                    # Reset state flag when active 2FA sessions clear
                     if len(self.authenticator.active_sessions) == 0:
-                        admin_portal_opened = False
+                        self._portal_opened_for.clear()
 
                     # 2. Check for QR Code scan OR mobile keycard swipe from admin route
                     if self.authenticator.active_sessions:
@@ -391,6 +399,8 @@ class WebcamCapture:
                                         break
 
                         if is_granted:
+                            if qr_name:
+                                self._portal_opened_for[qr_name] = False
                             # Update auth state for the corresponding employee
                             for tid, info in list(self.auth_states.items()):
                                 if info.get("name") == qr_name:
@@ -556,6 +566,12 @@ class WebcamCapture:
                         break
                     if key in {ord("s"), ord("S")}:
                         self._save_screenshot(frame)
+                    if key in {ord("f"), ord("F")}:
+                        prop = cv2.getWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN)
+                        if prop == cv2.WINDOW_FULLSCREEN:
+                            cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                        else:
+                            cv2.setWindowProperty(self.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                 else:
                     time.sleep(0.005)
 
