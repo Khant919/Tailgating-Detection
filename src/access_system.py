@@ -164,6 +164,7 @@ class AccessController:
             name = request.args.get("name", "")
             with self._lock:
                 is_scanned = (
+                    ("ANY_SCAN" in self._scanned_sessions) or
                     (token and token in self._scanned_sessions) or
                     (name and name in self._scanned_sessions) or
                     (name and name.strip().lower() in self._scanned_sessions)
@@ -423,7 +424,7 @@ class AccessController:
         const empName = "{{ name }}";
         let isClosing = false;
 
-        // Poll every 300ms to detect when smartphone scans QR code
+        // Poll every 250ms to detect when smartphone loads /keycard
         const pollTimer = setInterval(async () => {
             if (isClosing) return;
             try {
@@ -433,23 +434,26 @@ class AccessController:
                     if (data.scanned) {
                         isClosing = true;
                         clearInterval(pollTimer);
+                        
+                        // 1. Instantly vanish page content
                         document.body.innerHTML = `
-                            <div style="background-color: #0d1117; color: #3fb950; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Segoe UI', Tahoma, sans-serif; text-align: center; padding: 20px;">
-                                <div style="font-size: 56px; margin-bottom: 15px;">📱 ➔ 💳</div>
-                                <h2 style="color: #00ff66; margin: 0 0 10px 0;">QR Code Scanned!</h2>
-                                <p style="color: #8b949e; margin: 0 0 20px 0; max-width: 340px; font-size: 14px;">Mobile Keycard loaded on your smartphone. Returning to camera view...</p>
-                                <span style="font-size: 12px; color: #58a6ff;">Closing this tab...</span>
+                            <div style="background-color: #000000; color: #00ff66; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Segoe UI', Tahoma, sans-serif; text-align: center; padding: 20px;">
+                                <div style="font-size: 48px; margin-bottom: 12px;">📱 ➔ 💳</div>
+                                <h2 style="color: #00ff66; margin: 0 0 8px 0; font-size: 22px;">QR Code Scanned!</h2>
+                                <p style="color: #8b949e; margin: 0 0 12px 0; font-size: 14px;">Mobile Keycard transferred to phone. Closing window...</p>
                             </div>
                         `;
+
+                        // 2. Self-close the browser tab immediately
                         setTimeout(() => {
-                            window.open('', '_self', '');
-                            window.close();
-                            window.location.href = 'about:blank';
-                        }, 500);
+                            try { window.open('', '_self', '').close(); } catch(e) {}
+                            try { window.close(); } catch(e) {}
+                            try { window.location.replace("about:blank"); } catch(e) {}
+                        }, 300);
                     }
                 }
             } catch (e) {}
-        }, 300);
+        }, 250);
     </script>
 </body>
 </html>
@@ -470,8 +474,12 @@ class AccessController:
             from flask import render_template_string
             
             token = request.args.get("token")
-            if token:
-                with self._lock:
+            with self._lock:
+                self._scanned_sessions.add("ANY_SCAN")
+                if self._pending_face_match:
+                    self._scanned_sessions.add(self._pending_face_match)
+                    self._scanned_sessions.add(self._pending_face_match.strip().lower())
+                if token:
                     self._scanned_sessions.add(token)
                     try:
                         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
@@ -483,6 +491,7 @@ class AccessController:
                         print(f"[AccessController] 📱 QR Code Scanned! Mobile keycard connected: {emp_name} ({emp_id})")
                     except Exception:
                         pass
+
 
             
             html_template = """
