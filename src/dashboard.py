@@ -579,7 +579,8 @@ def run_dashboard_server():
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     
-    print(f"[Dashboard] Starting Flask server on http://{BIND_HOST}:{DASHBOARD_PORT} (auth required)...")
+    display_host = "localhost" if BIND_HOST in {"0.0.0.0", "127.0.0.1"} else BIND_HOST
+    print(f"[Dashboard] 🛡️ Security Dashboard live at: http://localhost:{DASHBOARD_PORT} (or http://127.0.0.1:{DASHBOARD_PORT})")
     app.run(host=BIND_HOST, port=DASHBOARD_PORT, debug=False, use_reloader=False, threaded=True)
 
 if __name__ == "__main__":
