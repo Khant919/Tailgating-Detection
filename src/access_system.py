@@ -424,7 +424,7 @@ class AccessController:
         const empName = "{{ name }}";
         let isClosing = false;
 
-        // Poll every 250ms to detect when smartphone loads /keycard
+        // Poll to detect when smartphone loads /keycard
         const pollTimer = setInterval(async () => {
             if (isClosing) return;
             try {
@@ -435,19 +435,35 @@ class AccessController:
                         isClosing = true;
                         clearInterval(pollTimer);
                         
-                        // 1. Instantly blank out and vanish page
-                        document.body.innerHTML = '';
-                        document.body.style.backgroundColor = '#000000';
-                        document.title = 'Access Granted';
+                        // Display confirmation and countdown before closing
+                        document.body.innerHTML = `
+                            <div style="text-align: center; padding: 40px 20px; font-family: monospace; color: #00ff66;">
+                                <div style="font-size: 52px; margin-bottom: 12px;">✅</div>
+                                <h2 style="font-size: 26px; margin: 0 0 10px 0; color: #00ff66; letter-spacing: 1px;">QR CODE SCANNED</h2>
+                                <p style="font-size: 16px; color: #a0ffa0; margin-bottom: 20px;">Mobile Keycard Connected for <b>${empName}</b></p>
+                                <div style="display: inline-block; background: #112211; border: 1px solid #00ff66; border-radius: 8px; padding: 12px 24px; color: #88ff88; font-size: 14px;">
+                                    Closing window in <b id="countdown" style="color: #ffffff; font-size: 16px;">3</b>s...
+                                </div>
+                            </div>
+                        `;
+                        document.title = '✅ QR Scanned - ' + empName;
 
-                        // 2. Self-close the browser tab immediately
-                        try { window.open('', '_self', ''); window.close(); } catch(e) {}
-                        try { window.close(); } catch(e) {}
-                        try { window.location.replace("about:blank"); } catch(e) {}
+                        let timeLeft = 3;
+                        const countInterval = setInterval(() => {
+                            timeLeft -= 1;
+                            const el = document.getElementById('countdown');
+                            if (el) el.innerText = timeLeft;
+                            if (timeLeft <= 0) {
+                                clearInterval(countInterval);
+                                try { window.open('', '_self', ''); window.close(); } catch(e) {}
+                                try { window.close(); } catch(e) {}
+                                try { window.location.replace("about:blank"); } catch(e) {}
+                            }
+                        }, 1000);
                     }
                 }
             } catch (e) {}
-        }, 250);
+        }, 300);
     </script>
 </body>
 </html>

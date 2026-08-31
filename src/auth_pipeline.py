@@ -42,7 +42,7 @@ except Exception as exc:
     print(f"[2FA] pyzbar unavailable ({exc.__class__.__name__}) — camera QR scanning disabled.")
     pyzbar = None
 
-from config import FACE_MATCH_TOLERANCE, FACE_CONSENSUS_FRAMES
+from config import FACE_MATCH_TOLERANCE, FACE_CONSENSUS_FRAMES, TWO_FACTOR_TIMEOUT
 from src.database import DatabaseManager
 
 
@@ -55,7 +55,7 @@ class TwoFactorAuthenticator:
     def __init__(
         self,
         known_faces_dir: str = "known_faces",
-        expiration_seconds: float = 5.0,
+        expiration_seconds: float = TWO_FACTOR_TIMEOUT,
         tolerance: float = FACE_MATCH_TOLERANCE,
         consensus_frames: int = FACE_CONSENSUS_FRAMES,
         db: Optional[DatabaseManager] = None,

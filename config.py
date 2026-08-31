@@ -65,6 +65,9 @@ FACE_MATCH_TOLERANCE = float(os.environ.get("TAILGATE_FACE_TOLERANCE", "0.48"))
 # Number of consecutive matching frames required before confirming face identity
 FACE_CONSENSUS_FRAMES = int(os.environ.get("TAILGATE_FACE_CONSENSUS_FRAMES", "2"))
 
+# Time limit in seconds for employee to scan QR code on phone after face is recognized
+TWO_FACTOR_TIMEOUT = float(os.environ.get("TAILGATE_2FA_TIMEOUT", "20.0"))
+
 # COCO dataset class ID for 'person'
 PERSON_CLASS_ID = 0
 
