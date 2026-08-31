@@ -71,9 +71,9 @@ class PersonDetector:
 
     def _extract_color_embedding(self, frame: np.ndarray, bbox: tuple[int, int, int, int]) -> list[float]:
         """
-        Creates a lightweight visual embedding of a person inside the bounding box.
-        Divides the box into 3 vertical zones (Upper torso, Mid body, Lower legs)
-        and extracts Hue-Saturation (HSV) color histograms for each zone.
+        Creates a robust visual embedding of a person inside the bounding box.
+        Extracts both a global Hue-Saturation (HSV) histogram and 3-zone vertical
+        histograms to remain invariant across ducking, crouching, and partial cropping.
         """
         h_f, w_f = frame.shape[:2]
         x1, y1, x2, y2 = bbox
@@ -90,15 +90,18 @@ class PersonDetector:
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         h, w = hsv.shape[:2]
         
-        # Divide into 3 vertical zones (capturing shirt, mid, and pants colors)
+        hist_parts = []
+        # 1. Global overall crop color histogram (scale & crop invariant)
+        global_hist = cv2.calcHist([hsv], [0, 1], None, [8, 8], [0, 180, 0, 256])
+        cv2.normalize(global_hist, global_hist)
+        hist_parts.extend(global_hist.flatten().tolist())
+
+        # 2. Divide into 3 vertical zones (capturing shirt, mid, and lower colors)
         z1, z2 = h // 3, (2 * h) // 3
         zones = [hsv[0:z1, :], hsv[z1:z2, :], hsv[z2:h, :]]
-        
-        hist_parts = []
         for zone in zones:
             if zone.size == 0:
                 continue
-            # Calculate H-S 2D histogram (8 bins for H, 8 bins for S = 64 dimensions per zone)
             hist = cv2.calcHist([zone], [0, 1], None, [8, 8], [0, 180, 0, 256])
             cv2.normalize(hist, hist)
             hist_parts.extend(hist.flatten().tolist())
@@ -241,8 +244,8 @@ class PersonDetector:
                 last_frame, last_bbox = self.active_tracks[lid]
                 emb = self._extract_color_embedding(last_frame, last_bbox)
                 if emb:
-                    # Save the last known embedding in the buffer
-                    self.lost_tracks[lid] = emb
+                    # Save the last known embedding and bounding box in the buffer
+                    self.lost_tracks[lid] = (emb, last_bbox)
 
             # Find newly assigned IDs that are not already remapped
             new_ids = (current_ids - prev_active_ids) - set(self.id_remapping.keys())
@@ -251,21 +254,42 @@ class PersonDetector:
                 if nid_bbox:
                     emb = self._extract_color_embedding(frame, nid_bbox)
                     if emb and self.lost_tracks:
-                        # Compare against all lost track embeddings
-                        best_similarity = 0.0
+                        nid_cx = (nid_bbox[0] + nid_bbox[2]) // 2
+                        best_score = 0.0
                         best_match_id = -1
-                        for lost_id, lost_emb in list(self.lost_tracks.items()):
-                            sim = self._cosine_similarity(emb, lost_emb)
-                            if sim > best_similarity:
-                                best_similarity = sim
+
+                        for lost_id, entry in list(self.lost_tracks.items()):
+                            lost_emb, lost_bbox = entry if isinstance(entry, tuple) else (entry, None)
+                            color_sim = self._cosine_similarity(emb, lost_emb)
+
+                            # Compute spatial lane distance score
+                            if lost_bbox:
+                                lost_cx = (lost_bbox[0] + lost_bbox[2]) // 2
+                                spatial_dist = abs(nid_cx - lost_cx)
+                                max_lane_width = max(120, int(frame.shape[1] * 0.28))
+                                spatial_score = max(0.0, 1.0 - (spatial_dist / max_lane_width))
+                            else:
+                                spatial_score = 0.5
+                                spatial_dist = 999
+
+                            combined_score = 0.60 * color_sim + 0.40 * spatial_score
+
+                            is_match = (
+                                combined_score >= 0.60 or
+                                color_sim >= 0.75 or
+                                (spatial_dist < 100 and color_sim >= 0.45)
+                            )
+
+                            if is_match and combined_score > best_score:
+                                best_score = combined_score
                                 best_match_id = lost_id
-                        
-                        # Remap new ID to old ID if it meets similarity threshold (0.8)
-                        if best_similarity >= 0.8:
+
+                        # Remap new ID to old ID if it meets matching criteria
+                        if best_match_id >= 0:
                             if best_match_id != nid:
                                 print(
                                     f"[PersonDetector] 🔗 Re-ID Match: Remapped Track ID {nid} "
-                                    f"to reclaimed ID {best_match_id} (Similarity: {best_similarity:.2f})"
+                                    f"to reclaimed ID {best_match_id} (Score: {best_score:.2f})"
                                 )
                                 self.id_remapping[nid] = best_match_id
                             # Remove the matched ID from the lost buffer
