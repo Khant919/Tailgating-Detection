@@ -32,9 +32,11 @@ from config import (
     DOOR_ROI_TOP_LEFT,
     SCREENSHOT_DIR,
     SCREENSHOT_FILENAME_FORMAT,
+    FACE_RECOGNITION_INTERVAL_FRAMES,
     HEADLESS_MODE,
     PROCESS_EVERY_N_FRAMES,
     TRACK_COLORS,
+    TWO_FACTOR_TIMEOUT_SECONDS,
 )
 
 import sys
@@ -98,8 +100,11 @@ class WebcamCapture:
         self.detector      = detector
         self.counter       = counter
         self.controller    = controller
-        self.authenticator = authenticator or TwoFactorAuthenticator()
+        self.authenticator = authenticator or TwoFactorAuthenticator(
+            expiration_seconds=TWO_FACTOR_TIMEOUT_SECONDS
+        )
         self.auth_states   = {} # track_id -> {"status": str, "name": str, "timestamp": float}
+        self._last_face_check_frame: Dict[int, int] = {}  # track_id -> frame_count last verify_face() ran
         self._portal_opened_for: Dict[str, bool] = {}       # emp_name -> bool
         self._last_portal_open_time: Dict[str, float] = {}   # emp_name -> timestamp
 
@@ -350,10 +355,22 @@ class WebcamCapture:
                 # Module 10: 2FA Authentication Engine (Face Recognition + QR Scan & Keycard)
                 if self.authenticator is not None and detections:
                     # 1. Pass frame and bounding box of tracked people to verify_face()
+                    live_track_ids = {det.track_id for det in detections}
                     for det in detections:
                         # Skip if already granted access for this track to prevent reopening tabs
                         if self.auth_states.get(det.track_id, {}).get("status") == "granted":
                             continue
+
+                        # Throttle: a face doesn't change frame-to-frame, so re-running
+                        # the ~10-15ms dlib encoding on every pass wastes CPU once a
+                        # track has already been checked recently.
+                        last_checked = self._last_face_check_frame.get(det.track_id)
+                        if (
+                            last_checked is not None
+                            and self.frame_count - last_checked < FACE_RECOGNITION_INTERVAL_FRAMES
+                        ):
+                            continue
+                        self._last_face_check_frame[det.track_id] = self.frame_count
 
                         is_matched, emp_name = self.authenticator.verify_face(frame, det.bbox)
                         if is_matched:
@@ -380,6 +397,11 @@ class WebcamCapture:
                     # Reset state flag when active 2FA sessions clear
                     if len(self.authenticator.active_sessions) == 0:
                         self._portal_opened_for.clear()
+
+                    # Drop throttle bookkeeping for tracks no longer on screen.
+                    stale_ids = set(self._last_face_check_frame) - live_track_ids
+                    for stale_id in stale_ids:
+                        self._last_face_check_frame.pop(stale_id, None)
 
                     # 2. Check for QR Code scan OR mobile keycard swipe from admin route
                     if self.authenticator.active_sessions:
@@ -434,7 +456,7 @@ class WebcamCapture:
                                 name = info.get("name", "")
 
                                 if status == "matched":
-                                    if (now - info.get("timestamp", 0)) <= 5.0:
+                                    if (now - info.get("timestamp", 0)) <= TWO_FACTOR_TIMEOUT_SECONDS:
                                         # Yellow Bounding Box: FACE MATCHED: AWAITING QR...
                                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
                                         cv2.putText(

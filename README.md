@@ -34,8 +34,10 @@ flowchart TD
 ### 1. 🔑 2-Factor Authentication (2FA) Pipeline (`src/auth_pipeline.py`)
 - **Biometric Face Enrollment**: Pre-computes 128D face encodings from images in `known_faces/` (supports `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`, `.tiff`).
 - **Resolution Guard**: Enforces a minimum `60x60` px face crop dimension before encoding to eliminate false positives when subjects are too far away.
+- **Throttled Recognition**: The dlib face encoding (~10-15ms per person on CPU) only re-runs for a given track every `FACE_RECOGNITION_INTERVAL_FRAMES` detection passes (default `5`, override with `TAILGATE_FACE_RECOGNITION_INTERVAL`) instead of every frame — the biggest single FPS cost with multiple people in view.
 - **Passive Liveness Detection (EAR)**: Computes Eye Aspect Ratio (EAR) and monitors EAR variance across 5 consecutive frames. Rejects static photos or phone screen spoofing attempts with a `⚠️ SPOOF ATTEMPT DETECTED` alert.
-- **5-Second Session Expiration**: Active face matches automatically time out after 5 seconds if no QR code scan or mobile keycard swipe occurs.
+- **Session Expiration**: Active face matches automatically time out (default **20s**, configurable via `TAILGATE_2FA_TIMEOUT_SECONDS`) if no QR code scan or mobile keycard swipe occurs — completing the QR scan/swipe after the window closes still resolves as a tailgate breach even though the face matched, since face match alone is only the first factor.
+- **Swipe Validity Window**: Once the QR scan/keycard swipe itself succeeds, it stays queued for **30s** (configurable via `TAILGATE_SWIPE_TIMEOUT_SECONDS`) waiting to be matched to that person's tripwire crossing — a separate timer from session expiration above, covering the walk from phone-tap to actually passing through the door.
 
 ### 2. 📱 Admin Portal & Dynamic QR Badge Generator (`src/access_system.py`)
 - **Auto-Browser Launch**: When a face match occurs, the system automatically launches the Admin Portal (`http://localhost:5005/admin`) in a single browser window.
@@ -50,6 +52,8 @@ flowchart TD
 - **API Key Security**: Validates requests via `x-api-key` headers or JWT bearer tokens, compared in constant time.
 - **Secrets from the environment**: the JWT signing key, API key and dashboard password are read from environment variables (see `.env.example`). The committed development fallbacks are public and the app prints a loud warning while they are in use.
 - **Loopback by default**: both servers bind `127.0.0.1`. Set `TAILGATE_BIND_HOST=0.0.0.0` only on a trusted network — this is required for the phone QR flow.
+- **Production WSGI server**: both the access API and the evidence dashboard run under `waitress` (not the Flask development server), so there is no "do not use in production" warning and no single-threaded request bottleneck.
+- **Headless mode**: set `TAILGATE_HEADLESS=true` to disable all `cv2.imshow`/`cv2.waitKey` calls, for running on a machine with no attached display (e.g. an on-site server). Stop the process with Ctrl+C in this mode, since the `q` keyboard shortcut needs the video window.
 
 ### 3b. 🪪 Identity-Bound Entry Authorisation
 A swipe only authorises the person it belongs to. Each tripwire crossing reports the
@@ -60,6 +64,13 @@ authorise any body, which is precisely the attack this system exists to catch.
 
 When no face match exists for the crossing person, the system falls back to card-only
 mode and logs the entry as unverified.
+
+### 3c. 📨 Telegram Breach Alerts (`src/access_system.py`)
+Every tailgate breach — including hidden/occluded entries — fires an optional Telegram
+message via the Bot API, in the same fire-and-forget daemon thread as the generic
+webhook, so it never blocks the OpenCV loop. Enable it by setting both
+`TAILGATE_TELEGRAM_BOT_TOKEN` and `TAILGATE_TELEGRAM_CHAT_ID` (see `.env.example`);
+leave either unset to disable it.
 
 ### 4. 🔊 Non-Blocking Audio Breach Alarm (`src/live_capture.py`)
 - Spawns a dedicated background daemon thread (`BreachAlarmThread`) running `winsound.Beep(2000, 500)` (Windows) or `\a` terminal bell (Linux/macOS) whenever a tailgate breach occurs, ensuring zero OpenCV video frame stuttering.
@@ -89,6 +100,12 @@ person gets a normal entry event and **each hidden person gets their own entry e
 flagged as occluded**. An occluded entry has no track and no authentication, and is barred
 from consuming anyone else's swipe — so it always resolves to a tailgate, logged as
 `Tailgate Detected (Occluded)`.
+
+If a single person's own arm/leg motion is being misread as a second, hidden person
+(spurious `Tailgate Detected (Occluded)` events), loosen the detector via
+`TAILGATE_MIN_OCCLUSION_FRAMES` (default 4 of the last `TAILGATE_OCCLUSION_MEMORY_FRAMES`,
+default 6) and `TAILGATE_OPTICAL_FLOW_SPLIT_THRESHOLD` (default 20.0 px/frame) — raising
+either reduces false positives at some cost to how quickly a real hidden tailgater is caught.
 
 ### 6. 📐 Resolution-Independent Tripwire
 The counting line and the occlusion threshold are derived from frame-relative ratios and
@@ -231,6 +248,85 @@ curl -X POST http://127.0.0.1:5005/swipe -H "x-api-key: $TAILGATE_API_KEY" -H "C
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+---
+
+## 🏢 Deployment: On-Site PC, LAN-Only
+
+This is not a cloud-hostable web app — it reads a live camera feed and runs an OpenCV
+loop, so it is *installed* on a machine at the door rather than *hosted*. The supported
+deployment is a dedicated on-site PC (a mini-PC or laptop; a Raspberry Pi is too weak for
+YOLOv8 + dlib) with the webcam mounted overhead, kept on the local network only.
+
+**Nothing is exposed to the internet.** Remote visibility comes from Telegram alerts
+(§3c), which the on-site PC sends *outbound* — so breach notifications reach a phone
+anywhere without any inbound port, tunnel, or public URL. The dashboard stays on the LAN
+because its screenshots contain people's faces; the fewer places that is reachable from,
+the better.
+
+### Operating model
+
+| Concern | How it is served |
+| :--- | :--- |
+| Breach notifications, from anywhere | **Telegram alerts** (outbound only) |
+| Evidence dashboard, guard review | `http://<pc-lan-ip>:5001` — same Wi-Fi/LAN only |
+| Phone QR / mobile keycard | `http://<pc-lan-ip>:5005` — same Wi-Fi/LAN only |
+| Public internet access | **Not configured, by design** |
+
+### Configuring it for an always-on install
+
+Per-terminal `$env:` assignments only last for that one session, which is no good for a
+machine meant to run unattended. Use **a `.env` file in the project root** — `config.py`
+loads it at import time via `python-dotenv`, so no terminal setup is needed at all:
+
+```ini
+TAILGATE_JWT_SECRET=<generated>
+TAILGATE_API_KEY=<generated>
+TAILGATE_DASHBOARD_USER=guard
+TAILGATE_DASHBOARD_PASSWORD=<your password>
+TAILGATE_BIND_HOST=0.0.0.0
+TAILGATE_TELEGRAM_BOT_TOKEN=<bot token>
+TAILGATE_TELEGRAM_CHAT_ID=<chat id>
+```
+
+`.env` is gitignored — never commit it. Copy `.env.example` as the starting point.
+
+Machine-level environment variables (Windows: `[Environment]::SetEnvironmentVariable(name,
+value, "Machine")`, needs admin) work too and take precedence over `.env`, since
+`load_dotenv()` does not override values that are already set. Be aware of one Windows
+gotcha: a newly set machine variable is **not** visible to any already-running process,
+including terminal host apps like Windows Terminal or VS Code — opening a new tab is not
+enough, because the tab inherits the host's stale environment. Only processes started
+after a reboot (or after fully restarting the terminal application) see it. `.env` has no
+such delay, which is why it is the recommended option here.
+
+Then just run:
+
+```powershell
+cd I:\Tailgating_Detection
+venv312\Scripts\python main.py
+```
+
+Confirm the startup banner shows `telegram=enabled` and no `SECURITY WARNING` block — if
+it still warns about development secrets, the configuration is not being picked up.
+
+`TAILGATE_BIND_HOST=0.0.0.0` binds both servers to every interface on that machine. On a
+trusted private LAN behind a router that is exactly what the phone flow needs; it is
+**not** the same as exposing them to the internet, which would additionally require port
+forwarding on the router (do not add it).
+
+If the PC has no monitor attached, set `TAILGATE_HEADLESS=true` and stop the process with
+Ctrl+C, since the `q` shortcut needs the video window.
+
+### If remote dashboard access is genuinely needed later
+
+Use **Tailscale** (a private WireGuard mesh — only your own signed-in devices can reach
+the machine, no public URL) or a **Cloudflare Tunnel** with Cloudflare Access in front of
+it. Note that both are blocked on some ISPs by deep packet inspection, which shows up as
+a TCP connection that succeeds while the request itself silently times out; a mobile
+hotspot is the quickest way to confirm that is what you are seeing. Never substitute
+plain router port forwarding for these — that publishes the face-evidence dashboard to
+the whole internet behind a single Basic Auth password.
 
 ---
 

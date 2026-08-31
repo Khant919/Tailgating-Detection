@@ -48,6 +48,8 @@ from config import (
     RATE_LIMIT_DEFAULT,
     RATE_LIMIT_SWIPE,
     SWIPE_TIMEOUT_SECONDS,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     WEBHOOK_URL,
 )
 
@@ -121,14 +123,18 @@ class AccessController:
 
     def __init__(
         self,
-        port:          int   = FLASK_PORT,
-        swipe_timeout: float = SWIPE_TIMEOUT_SECONDS,
-        webhook_url:   str   = WEBHOOK_URL,
-        db:            Optional[DatabaseManager] = None,
+        port:              int   = FLASK_PORT,
+        swipe_timeout:     float = SWIPE_TIMEOUT_SECONDS,
+        webhook_url:       str   = WEBHOOK_URL,
+        telegram_bot_token: str  = TELEGRAM_BOT_TOKEN,
+        telegram_chat_id:   str  = TELEGRAM_CHAT_ID,
+        db:                Optional[DatabaseManager] = None,
     ):
         self.port:          int           = port
         self.swipe_timeout: float         = swipe_timeout
         self.webhook_url:   Optional[str] = webhook_url or None
+        self.telegram_bot_token: Optional[str] = telegram_bot_token or None
+        self.telegram_chat_id:   Optional[str] = telegram_chat_id or None
         self.db:            DatabaseManager = db or DatabaseManager()
 
         self._valid_swipes: deque[SwipeRecord] = deque()
@@ -152,7 +158,8 @@ class AccessController:
         print(
             f"[AccessController] Initialised | port={self.port} | "
             f"timeout={self.swipe_timeout}s | "
-            f"webhook={'enabled' if self.webhook_url else 'disabled'}"
+            f"webhook={'enabled' if self.webhook_url else 'disabled'} | "
+            f"telegram={'enabled' if (self.telegram_bot_token and self.telegram_chat_id) else 'disabled'}"
         )
 
     def _register_routes(self) -> None:
@@ -738,24 +745,32 @@ class AccessController:
 
     def start_server(self) -> None:
         """
-        Launch Flask in a background daemon thread. Returns immediately.
+        Launch the Flask app under waitress (a production WSGI server) in a
+        background daemon thread. Returns immediately.
+
+        The Flask development server used previously logs a "do not use in
+        production" warning on every start for good reason: it is
+        single-threaded by default and not hardened against the kind of
+        traffic patterns a real deployment sees. waitress is a pure-Python
+        production-grade WSGI server, so no extra native dependency is needed.
         """
+        from waitress import serve
+
         self.server_thread = threading.Thread(
-            target=self._app.run,
+            target=serve,
+            args=(self._app,),
             kwargs={
-                "host":         BIND_HOST,
-                "port":         self.port,
-                "debug":        False,
-                "use_reloader": False,
-                "threaded":     True,
+                "host":    BIND_HOST,
+                "port":    self.port,
+                "threads": 8,
             },
             daemon=True,
-            name="FlaskAccessServer",
+            name="AccessServer",
         )
         self.server_thread.start()
 
         print(
-            f"[AccessController] 🚀 Flask server started on "
+            f"[AccessController] 🚀 Server started (waitress) on "
             f"http://{BIND_HOST}:{self.port}  (daemon thread)"
         )
         if BIND_HOST == "127.0.0.1":
@@ -858,6 +873,7 @@ class AccessController:
         }
 
         self._fire_webhook_async(event_data)
+        self._fire_telegram_async(event_data)
 
         return {"status": "tailgate", "host_employee": host}
 
@@ -904,6 +920,55 @@ class AccessController:
             args=(event_data,),
             daemon=True,
             name="WebhookAlertThread",
+        ).start()
+
+    def send_telegram_alert(self, event_data: dict) -> None:
+        """
+        POST a formatted tailgate alert to a Telegram chat via the Bot API.
+        """
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            return
+
+        host      = event_data.get("host_employee") or {}
+        host_name = host.get("name",        "Unknown")
+        host_id   = host.get("employee_id", "N/A")
+
+        detected_at = event_data.get("detected_at")
+        when = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(detected_at))
+            if detected_at else "Unknown"
+        )
+
+        text = (
+            event_data.get("alert_text", f"🚨 Tailgate Detected! Host responsible: {host_name} ({host_id})")
+            + f"\nTime: {when}"
+        )
+
+        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+
+        try:
+            response = requests.post(
+                url,
+                json={"chat_id": self.telegram_chat_id, "text": text},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                print("[AccessController] 📨 Telegram alert sent")
+            else:
+                print(
+                    f"[AccessController] ⚠️  Telegram alert failed | "
+                    f"status={response.status_code} | body={response.text[:200]}"
+                )
+        except requests.exceptions.RequestException as exc:
+            print(f"[AccessController] ⚠️  Telegram error — {exc}")
+
+    def _fire_telegram_async(self, event_data: dict) -> None:
+        """Launch send_telegram_alert() in a short-lived daemon thread."""
+        threading.Thread(
+            target=self.send_telegram_alert,
+            args=(event_data,),
+            daemon=True,
+            name="TelegramAlertThread",
         ).start()
 
     def pending_swipe_count(self) -> int:

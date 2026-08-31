@@ -9,6 +9,11 @@ ultralytics>=8.0.0
 flask>=3.0.0
 Flask-Limiter>=3.5.0
 requests>=2.31.0
+waitress>=3.0.0
+
+# Loads secrets from a local .env file (see .env.example). config.py degrades
+# gracefully without it, falling back to real environment variables only.
+python-dotenv>=1.0.0
 
 # 2FA: expiring JWT badge tokens + dynamic QR codes
 PyJWT>=2.8.0

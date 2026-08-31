@@ -574,14 +574,11 @@ def serve_screenshot(filename):
     return send_from_directory(SCREENSHOTS_DIR, base_name)
 
 def run_dashboard_server():
-    """Starts the Flask app on the configured host/port. Suppresses default terminal logging."""
-    import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    
-    display_host = "localhost" if BIND_HOST in {"0.0.0.0", "127.0.0.1"} else BIND_HOST
+    """Starts the Flask app under waitress (a production WSGI server)."""
+    from waitress import serve
+
     print(f"[Dashboard] 🛡️ Security Dashboard live at: http://localhost:{DASHBOARD_PORT} (or http://127.0.0.1:{DASHBOARD_PORT})")
-    app.run(host=BIND_HOST, port=DASHBOARD_PORT, debug=False, use_reloader=False, threaded=True)
+    serve(app, host=BIND_HOST, port=DASHBOARD_PORT, threads=8)
 
 if __name__ == "__main__":
     # Test execution

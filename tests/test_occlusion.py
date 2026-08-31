@@ -150,8 +150,8 @@ class VelocitySplitTests(unittest.TestCase):
         self.assertFalse(TripwireCounter._has_velocity_split(noise))
 
     def test_two_diverging_clusters_are_a_split(self):
-        """Separation must exceed OPTICAL_FLOW_SPLIT_THRESHOLD (12 px/frame)."""
-        diverging = np.array([-8.0, -7.5, -7.8, 7.4, 8.1, 7.9])
+        """Separation must exceed OPTICAL_FLOW_SPLIT_THRESHOLD (20 px/frame)."""
+        diverging = np.array([-13.0, -12.5, -12.8, 12.4, 13.1, 12.9])
         self.assertTrue(TripwireCounter._has_velocity_split(diverging))
 
     def test_separation_below_threshold_is_not_a_split(self):

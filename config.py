@@ -129,8 +129,19 @@ COUNTER_EXIT_COLOR     = (0, 0, 220)    # Red
 # Module 5: Access System Simulation & Core Logic (The Brain)
 # ---------------------------------------------------------------------------
 
-# How long (in seconds) a card swipe remains valid after it is registered
-SWIPE_TIMEOUT_SECONDS = 10
+# How long (in seconds) a card swipe/keycard-tap remains valid, waiting to be
+# matched against an actual tripwire crossing. Default widened from the
+# original 10s: the realistic phone flow (tap unlock -> pocket phone -> walk to
+# and through the door) routinely takes longer than that, expiring a genuine
+# swipe before the person ever reaches the line and misreporting it as a
+# tailgate.
+SWIPE_TIMEOUT_SECONDS = float(os.environ.get("TAILGATE_SWIPE_TIMEOUT_SECONDS", "30"))
+
+# How long (in seconds) a 2FA session stays open after a face match, for the
+# employee to complete the QR scan / keycard swipe before it expires. Default
+# widened from the original 5s, which was too tight for the realistic phone
+# flow (portal opens -> pick up phone -> open camera -> scan).
+TWO_FACTOR_TIMEOUT_SECONDS = float(os.environ.get("TAILGATE_2FA_TIMEOUT_SECONDS", "20"))
 
 # Port for local Flask HTTP API
 FLASK_PORT = 5005
@@ -147,6 +158,12 @@ RATE_LIMIT_DEFAULT = ["200 per day", "50 per hour"]
 # Webhook URL for external alert notifications (Slack / Teams / webhook.site).
 # Set TAILGATE_WEBHOOK_URL to enable; alerts are skipped while it is unset.
 WEBHOOK_URL = os.environ.get("TAILGATE_WEBHOOK_URL", "")
+
+# Telegram bot alert for tailgate breaches. Both must be set to enable; create a
+# bot via @BotFather to get the token, and message the bot once (or add it to a
+# group) then read the chat id from https://api.telegram.org/bot<token>/getUpdates.
+TELEGRAM_BOT_TOKEN = os.environ.get("TAILGATE_TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TAILGATE_TELEGRAM_CHAT_ID", "")
 
 # Secrets are read from the environment. The development fallbacks below let the
 # demo run out of the box, but they are published in this repository and are
@@ -202,11 +219,20 @@ def warn_on_insecure_secrets() -> None:
 # Module 7: Optimization & QA Testing
 # ---------------------------------------------------------------------------
 
-# Disable all cv2.imshow and cv2.waitKey calls to save CPU.
-HEADLESS_MODE = False
+# Disable all cv2.imshow and cv2.waitKey calls — required on a machine with no
+# attached display (an on-site server running the camera loop unattended).
+HEADLESS_MODE = os.environ.get("TAILGATE_HEADLESS", "false").strip().lower() in ("1", "true", "yes")
 
 # Process only every N-th frame to halve CPU load; reuse previous tracking data for skipped frames.
 PROCESS_EVERY_N_FRAMES = 2
+
+# Re-run face recognition (dlib encoding) for a given track only every N detection
+# passes, instead of every single one. verify_face() costs ~10-15ms per person on
+# CPU, so with several people in frame this is the single biggest FPS drain.
+# A person's face doesn't change frame-to-frame, so checking it this often is
+# wasted work — this only delays how quickly a new face gets matched, by at most
+# FACE_RECOGNITION_INTERVAL_FRAMES detection passes.
+FACE_RECOGNITION_INTERVAL_FRAMES = int(os.environ.get("TAILGATE_FACE_RECOGNITION_INTERVAL", "5"))
 
 # Maximum expected bounding box area for a single person, as a fraction of the
 # frame area. Exceeding it flags potential occlusion (two people merged into one
@@ -237,8 +263,16 @@ MAX_OCCUPANCY_PER_BOX = 3
 # Occupancy is judged over a short window of frames rather than a single frame,
 # so one noisy detection cannot inflate the count. The box must look merged in
 # at least MIN_OCCLUSION_FRAMES of the last OCCLUSION_MEMORY_FRAMES frames.
-OCCLUSION_MEMORY_FRAMES = 6
-MIN_OCCLUSION_FRAMES    = 2
+# MIN_OCCLUSION_FRAMES defaults higher than the original 2/6: a single person
+# close to the camera (arm swing, walking motion) was tripping the merge
+# heuristic on a couple of noisy frames and getting logged as a second,
+# occluded person. Requiring the signal to persist across more of the window
+# filters that out while still catching a real sustained two-person overlap.
+OCCLUSION_MEMORY_FRAMES = int(os.environ.get("TAILGATE_OCCLUSION_MEMORY_FRAMES", "6"))
+MIN_OCCLUSION_FRAMES    = int(os.environ.get("TAILGATE_MIN_OCCLUSION_FRAMES", "4"))
 
-# Minimum optical flow velocity split divergence threshold (pixels/frame) to flag tailgating occlusion.
-OPTICAL_FLOW_SPLIT_THRESHOLD = 12.0
+# Minimum optical flow velocity split divergence threshold (pixels/frame) to flag
+# tailgating occlusion. Raised from the original 12.0 for the same reason: normal
+# single-person limb motion was crossing that bar often enough to look like two
+# diverging people.
+OPTICAL_FLOW_SPLIT_THRESHOLD = float(os.environ.get("TAILGATE_OPTICAL_FLOW_SPLIT_THRESHOLD", "20.0"))
