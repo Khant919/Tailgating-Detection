@@ -42,6 +42,7 @@ except Exception as exc:
     print(f"[2FA] pyzbar unavailable ({exc.__class__.__name__}) — camera QR scanning disabled.")
     pyzbar = None
 
+from config import FACE_MATCH_TOLERANCE, FACE_CONSENSUS_FRAMES
 from src.database import DatabaseManager
 
 
@@ -55,7 +56,8 @@ class TwoFactorAuthenticator:
         self,
         known_faces_dir: str = "known_faces",
         expiration_seconds: float = 5.0,
-        tolerance: float = 0.6,
+        tolerance: float = FACE_MATCH_TOLERANCE,
+        consensus_frames: int = FACE_CONSENSUS_FRAMES,
         db: Optional[DatabaseManager] = None,
     ):
         """
@@ -64,12 +66,14 @@ class TwoFactorAuthenticator:
         Args:
             known_faces_dir: Directory containing employee reference photos (.jpg, .jpeg, .png).
             expiration_seconds: Time limit (in seconds) for completing QR scan after face match.
-            tolerance: Distance threshold for face_recognition matching (lower = stricter).
+            tolerance: Distance threshold for face_recognition matching (lower = stricter, 0.48 eliminates false positives).
+            consensus_frames: Number of consecutive matching frames required to declare a confirmed match.
             db: Optional DatabaseManager instance.
         """
         self.known_faces_dir = known_faces_dir
         self.expiration_seconds = expiration_seconds
         self.tolerance = tolerance
+        self.consensus_frames = consensus_frames
         self.db = db or DatabaseManager()
 
         # Dictionary storing enrolled employee embeddings: {"employee_name": np.ndarray}
@@ -80,6 +84,9 @@ class TwoFactorAuthenticator:
 
         # Sliding window history of Eye Aspect Ratios (EAR) for anti-spoofing liveness check: {"employee_name": [ear1, ear2, ...]}
         self.ear_history: Dict[str, List[float]] = {}
+
+        # Streak counter for consecutive frame matching consensus: {"employee_name": int}
+        self._match_streaks: Dict[str, int] = {}
 
         # Perform enrollment scanning on startup
         self._enroll_known_faces()
@@ -249,6 +256,11 @@ class TwoFactorAuthenticator:
 
         if best_distance <= self.tolerance:
             matched_name = known_names[best_match_index]
+            self._match_streaks[matched_name] = self._match_streaks.get(matched_name, 0) + 1
+
+            if self._match_streaks[matched_name] < self.consensus_frames:
+                # Require consecutive frame consensus before triggering match
+                return False, None
 
             # ------------------------------------------------------------------
             # PASSIVE LIVENESS CHECK: EAR & Static Photo Variance Detection
@@ -276,10 +288,13 @@ class TwoFactorAuthenticator:
 
             # State Management: Add/Update user in active sessions with current timestamp
             self.active_sessions[matched_name] = time.time()
-            print(f"[2FA Engine] [MATCH] FACE MATCHED: '{matched_name}' (Distance: {best_distance:.3f})")
+            print(f"[2FA Engine] ✅ FACE MATCHED: '{matched_name}' (Distance: {best_distance:.3f} <= {self.tolerance})")
             return True, matched_name
-
-        return False, None
+        else:
+            # Reset streak on non-match
+            closest_name = known_names[best_match_index]
+            self._match_streaks[closest_name] = 0
+            return False, None
 
     def scan_qr(self, frame: np.ndarray) -> Tuple[bool, Optional[str]]:
         """

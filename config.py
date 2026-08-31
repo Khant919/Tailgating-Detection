@@ -58,6 +58,13 @@ YOLO_MODEL = "yolov8n.pt"
 # Minimum detection confidence score (0.0 – 1.0)
 CONFIDENCE_THRESHOLD = float(os.environ.get("TAILGATE_CONFIDENCE_THRESHOLD", "0.65"))
 
+# Strict Euclidean distance threshold for 128D face encodings.
+# Lower value = stricter. 0.48 prevents false matches between different people.
+FACE_MATCH_TOLERANCE = float(os.environ.get("TAILGATE_FACE_TOLERANCE", "0.48"))
+
+# Number of consecutive matching frames required before confirming face identity
+FACE_CONSENSUS_FRAMES = int(os.environ.get("TAILGATE_FACE_CONSENSUS_FRAMES", "2"))
+
 # COCO dataset class ID for 'person'
 PERSON_CLASS_ID = 0
 
