@@ -252,6 +252,9 @@ class TripwireCounter:
                     self.estimate_box_occupancy(det.bbox, flow_splits.get(det.track_id, False)),
                 )
 
+        curr_ids = {det.track_id for det in detections if det.track_id >= 0}
+        disappeared_ids = getattr(self, "_last_frame_ids", set()) - curr_ids
+
         # Run crossing updates
         for det in detections:
             track_id = det.track_id
@@ -264,10 +267,25 @@ class TripwireCounter:
             curr_cy: int = (y1 + y2) // 2   # True centre
 
             if track_id not in self.track_history:
-                self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
-                continue
+                # Spatial link across ByteTrack ID switches: If an ID disappeared in the
+                # immediate previous frame and a new ID appears in the same lane, link them.
+                matched_prev = None
+                for old_id in disappeared_ids:
+                    old_pos = self.track_history.get(old_id)
+                    if old_pos and abs(old_pos[0] - curr_cx) < 150:
+                        matched_prev = old_pos
+                        if old_id in self.crossed_ids and track_id not in self.crossed_ids:
+                            self.crossed_ids[track_id] = self.crossed_ids[old_id]
+                        break
 
-            prev_entry = self.track_history[track_id]
+                if matched_prev is not None:
+                    prev_entry = matched_prev
+                else:
+                    self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
+                    continue
+            else:
+                prev_entry = self.track_history[track_id]
+
             # REFERENCE POINTS FOR CROSSING:
             # Evaluates upper torso / head level (y1 + 0.25 * height) and body centroid (cy)
             # This ensures both full-body walking and sitting webcam head down/up trigger reliably.
@@ -346,6 +364,7 @@ class TripwireCounter:
 
             self.track_history[track_id] = (curr_cx, curr_cy, y1, y2)
 
+        self._last_frame_ids = curr_ids
         return events
 
     @staticmethod
